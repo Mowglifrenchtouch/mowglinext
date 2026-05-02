@@ -216,7 +216,9 @@ const RobotModelStep: React.FC<RobotModelStepProps> = ({ values, onChange }) => 
 
 // ── GPS Configuration step (receiver + NTRIP, no datum) ─────────────────
 
-const GpsStep: React.FC<RobotModelStepProps> = ({ values, onChange }) => {
+type GpsStepProps = RobotModelStepProps & { gpsRestarting?: boolean };
+
+const GpsStep: React.FC<GpsStepProps> = ({ values, onChange, gpsRestarting }) => {
     const ntripEnabled = values.ntrip_enabled ?? true;
 
     return (
@@ -982,7 +984,7 @@ const OnboardingWizard: React.FC = () => {
                 {currentStep === 0 && <WelcomeStep onNext={handleNext} />}
                 {currentStep === 1 && <RobotModelStep values={localValues} onChange={handleChange} />}
                 {currentStep === 2 && <FirmwareStep onNext={handleNext} />}
-                {currentStep === 3 && <GpsStep values={localValues} onChange={handleChange} />}
+                {currentStep === 3 && <GpsStep values={localValues} onChange={handleChange} gpsRestarting={gpsRestarting} />}
                 {currentStep === 4 && <SensorStep values={localValues} onChange={handleChange} />}
                 {currentStep === 5 && <ImuYawStep values={localValues} onChange={handleChange} />}
                 {currentStep === 6 && <DatumStep values={localValues} onChange={handleChange} gpsRestarting={gpsRestarting} />}
