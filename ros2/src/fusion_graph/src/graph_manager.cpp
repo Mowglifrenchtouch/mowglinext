@@ -217,6 +217,18 @@ std::optional<TickOutput> GraphManager::Tick(double now_s)
 
 TickOutput GraphManager::CreateNodeLocked(double now_s)
 {
+  // Guard against next_index_ == 0: would underflow PoseKey(next_index_ - 1)
+  // and crash GTSAM with "Symbol index is too large" when j wraps to 2^64-1.
+  // Reachable historically when Load() restored an empty persisted graph
+  // (next_index=0) and marked the manager initialized; both Save() and Load()
+  // now refuse the empty case, but keep this defensive — the cost of the
+  // check is one compare and the upside is no abort if a future code path
+  // reintroduces the same hole.
+  if (next_index_ == 0)
+  {
+    return latest_.value_or(TickOutput{});
+  }
+
   // 1. Build the wheel between-factor: relative pose from X_{k-1} to X_k.
   //    Pose2(dx, dy, dtheta_gyro) — gyro for yaw, wheel for translation.
   //    If gyro accumulator is zero (no IMU received) fall back to wheel.
@@ -690,6 +702,13 @@ void GraphManager::Reset()
 bool GraphManager::Save(const std::string& prefix) const
 {
   std::lock_guard<std::mutex> lock(mu_);
+  // Refuse to persist an empty graph. An auto-save fired right after a
+  // Reset() would otherwise overwrite the on-disk files with
+  // next_index=0 / count=0; on next launch Load() restored that state,
+  // marked initialized_, and the first Tick crashed with a Symbol-index
+  // underflow. Keep whatever good state was on disk before the reset.
+  if (!initialized_ || next_index_ == 0)
+    return false;
   // Manual / on-checkpoint path. Always refreshes from iSAM2 — the
   // serialized state must reflect all factor updates since the last
   // RefreshEstimateLocked() call.
@@ -787,6 +806,15 @@ bool GraphManager::Load(const std::string& prefix)
   {
     return false;
   }
+
+  // Refuse to restore a degenerate persisted state. With next_idx == 0
+  // (or no values at all) marking initialized_ would let CreateNodeLocked
+  // form PoseKey(next_idx - 1) and underflow into a 2^64-1 Symbol index
+  // — GTSAM throws std::invalid_argument and the process aborts. Treat
+  // this as "no graph on disk" so the node bootstraps from the next GPS
+  // / set_pose seed.
+  if (next_idx == 0 || loaded_values.empty())
+    return false;
 
   // Re-seed iSAM2 with each loaded pose pinned by a tight prior; the
   // priors keep optimization stable as new wheel/GPS factors arrive.

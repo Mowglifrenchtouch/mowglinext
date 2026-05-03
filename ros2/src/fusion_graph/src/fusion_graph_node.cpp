@@ -681,7 +681,8 @@ void FusionGraphNode::OnHighLevelStatus(mowgli_interfaces::msg::HighLevelStatus:
   {
     constexpr uint8_t kRecording =
         mowgli_interfaces::msg::HighLevelStatus::HIGH_LEVEL_STATE_RECORDING;
-    if (last_hl_state_ == kRecording && msg->state != kRecording)
+    if (last_hl_state_ == kRecording && msg->state != kRecording &&
+        graph_->IsInitialized())
     {
       const bool ok = graph_->Save(graph_save_prefix_);
       RCLCPP_INFO(get_logger(),
@@ -738,7 +739,8 @@ void FusionGraphNode::OnSetPose(geometry_msgs::msg::PoseWithCovarianceStamped::C
 void FusionGraphNode::OnHardwareStatus(mowgli_interfaces::msg::Status::ConstSharedPtr msg)
 {
   // Rising edge of is_charging = robot just docked.
-  if (last_is_charging_valid_ && !last_is_charging_ && msg->is_charging)
+  if (last_is_charging_valid_ && !last_is_charging_ && msg->is_charging &&
+      graph_->IsInitialized())
   {
     const bool ok = graph_->Save(graph_save_prefix_);
     RCLCPP_INFO(get_logger(), "fusion_graph: auto-save on dock arrival → %s", ok ? "ok" : "failed");
