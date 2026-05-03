@@ -136,6 +136,11 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_factors fusion_graph_core)
 
+  ament_add_gtest(test_persistence
+    test/test_persistence.cpp
+  )
+  target_link_libraries(test_persistence fusion_graph_core)
+
   # Performance benchmarks. Long-running (~30 s on ARM); only meaningful
   # in Release builds. Output is grep-friendly for tracking regressions.
   ament_add_gtest(test_perf
