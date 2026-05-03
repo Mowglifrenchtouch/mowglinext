@@ -30,6 +30,8 @@
 # there is no ros-kilted-gtsam package. Source build gives the modern
 # OptionalMatrixType API needed by fusion_graph's GnssLeverArmFactor.
 # ---------------------------------------------------------------------------
+ARG BASE_IMAGE=ros:kilted-ros-base
+
 FROM ros:kilted-ros-base AS gtsam-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -58,7 +60,6 @@ RUN cd gtsam && mkdir build && cd build && \
         -DBUILD_SHARED_LIBS=ON \
  && make -j$(nproc) install
 
-ARG BASE_IMAGE=ros:kilted-ros-base
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
