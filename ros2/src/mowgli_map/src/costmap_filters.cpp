@@ -184,6 +184,38 @@ void MapServerNode::publish_keepout_mask()
     }
   }
 
+  // Dock corridor carve-out: force every cell inside the corridor polygon
+  // back to free (0), no matter what the previous passes set. Smac needs
+  // a non-lethal lane through the corridor for post-undock transit, so
+  // this carve overrides obstacle_polygons_, the inner-margin buffer, and
+  // any classification-layer no-go that happens to overlap. The dock body
+  // itself is NOT carved — it stays lethal via OBSTACLE_PERMANENT.
+  if (has_dock_exclusion_ && dock_corridor_polygon_.points.size() >= 3)
+  {
+    for (int r = 0; r < nx; ++r)
+    {
+      for (int c = 0; c < ny; ++c)
+      {
+        grid_map::Position pos;
+        const grid_map::Index idx(r, c);
+        if (!map_.getPosition(idx, pos))
+        {
+          continue;
+        }
+        geometry_msgs::msg::Point32 pt;
+        pt.x = static_cast<float>(pos.x());
+        pt.y = static_cast<float>(pos.y());
+        pt.z = 0.0F;
+        if (point_in_polygon(pt, dock_corridor_polygon_))
+        {
+          const int og_col = nx - 1 - r;
+          const int og_row = ny - 1 - c;
+          mask.data[static_cast<std::size_t>(og_row * nx + og_col)] = 0;
+        }
+      }
+    }
+  }
+
   cached_keepout_mask_ = mask;
   keepout_mask_pub_->publish(mask);
 

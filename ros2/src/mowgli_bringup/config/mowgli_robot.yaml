@@ -183,6 +183,13 @@ mowgli:
     dock_approach_distance: 1.0    # distance to staging pose in front of dock
     dock_max_retries: 3
     dock_use_charger_detection: true
+    # Dock body — physical structure the robot cannot drive through. Cells
+    # inside this rectangle (centred on dock_pose, axes aligned with
+    # dock_pose_yaw) are marked OBSTACLE_PERMANENT: F2C strips stop at
+    # the body edge and Smac sees them as lethal. Defaults match the
+    # YardForce500 dock; measure your dock and override per site.
+    dock_body_length_m: 0.80       # extent along dock -X (depth into dock)
+    dock_body_width_m: 0.55        # extent along dock ±Y (lateral)
 
     # -----------------------------------------------------------------
     # Rain

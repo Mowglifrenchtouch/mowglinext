@@ -492,10 +492,18 @@ private:
   /// shape via Minimum Bounding Rectangle. 0 = north-south, 90 = east-west.
   double mow_angle_override_deg_{std::numeric_limits<double>::quiet_NaN()};
 
-  /// Extent of the dock approach corridor along -X in dock local frame (m).
-  /// Cells within this rectangle in front of the dock are marked
-  /// NO_GO_ZONE so coverage strips stop before the straight-line alignment
-  /// corridor that opennav_docking needs for the final approach.
+  /// Dock body extent in dock local frame (m). The body is the physical
+  /// dock structure the robot cannot drive through. Cells inside the body
+  /// rectangle are marked OBSTACLE_PERMANENT — strips stop here, and Smac
+  /// treats it as lethal. Defaults match the YardForce500 dock.
+  double dock_body_length_m_{0.80};
+  double dock_body_width_m_{0.55};
+
+  /// Dock approach corridor in dock local frame (m). Rectangle behind the
+  /// dock body along -X used by opennav_docking for final alignment. Cells
+  /// here are classified DOCKING_AREA (mowable — corridor lawn still gets
+  /// cut) and explicitly carved out of the keepout mask so Smac can plan
+  /// transit through them post-undock.
   double dock_approach_corridor_length_m_{1.5};
   double dock_approach_corridor_half_width_m_{0.40};
 
@@ -531,7 +539,21 @@ private:
   geometry_msgs::msg::Pose docking_pose_;
   bool docking_pose_set_{false};
 
-  /// Dock exclusion polygon — cells inside are NO_GO_ZONE (no mowing strips).
+  /// Three coupled dock polygons in map frame, all derived from
+  /// docking_pose_ + dock_body/corridor parameters. Built once at startup.
+  ///   * dock_body_polygon_     — physical dock body (0.80×0.55 m default).
+  ///                              Marks OBSTACLE_PERMANENT in classification;
+  ///                              strips stop here, Smac treats as lethal.
+  ///   * dock_corridor_polygon_ — approach lane behind dock (1.5×0.80 m).
+  ///                              Marks DOCKING_AREA in classification
+  ///                              (mowable); explicitly carved out of the
+  ///                              keepout mask so Smac can plan post-undock.
+  ///   * dock_exclusion_polygon_ — union of the two above (kept for backward
+  ///                              compat / visualization). Not consumed by
+  ///                              the planner directly; body and corridor
+  ///                              polygons drive all real behavior.
+  geometry_msgs::msg::Polygon dock_body_polygon_;
+  geometry_msgs::msg::Polygon dock_corridor_polygon_;
   geometry_msgs::msg::Polygon dock_exclusion_polygon_;
   bool has_dock_exclusion_{false};
 

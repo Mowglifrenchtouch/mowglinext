@@ -85,11 +85,18 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options)
   mow_angle_override_deg_ =
       declare_parameter<double>("mow_angle_deg", std::numeric_limits<double>::quiet_NaN());
 
-  // Dock approach corridor — extends the no-mow zone in front of the dock
-  // so coverage strips stop before the 1.5 m straight-line alignment that
-  // opennav_docking needs for the final approach. Length is measured from
-  // dock_pose in the -X direction (dock local frame, same direction as
-  // staging_x_offset). Width is symmetric around the approach axis.
+  // Dock body (physical structure the robot cannot drive into). Cells
+  // inside are marked OBSTACLE_PERMANENT — F2C strips stop at the body
+  // edge and Smac treats them as lethal. Defaults match the YardForce500
+  // dock; override per-site in mowgli_robot.yaml.
+  dock_body_length_m_ = declare_parameter<double>("dock_body_length_m", 0.80);
+  dock_body_width_m_ = declare_parameter<double>("dock_body_width_m", 0.55);
+
+  // Dock approach corridor (behind the dock along -X). Cells here are
+  // classified DOCKING_AREA (mowable — corridor lawn still gets cut) and
+  // explicitly carved out of the keepout mask so Smac can plan post-undock
+  // transit. Length is measured from dock_pose in the -X direction (dock
+  // local frame, same direction as staging_x_offset). Width is symmetric.
   dock_approach_corridor_length_m_ =
       declare_parameter<double>("dock_approach_corridor_length_m", 1.5);
   dock_approach_corridor_half_width_m_ =
@@ -369,49 +376,74 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options)
     pose_msg.pose = docking_pose_;
     docking_pose_pub_->publish(pose_msg);
 
-    // Store dock exclusion polygon — used to mark dock cells as NO_GO_ZONE
-    // in the classification layer so strips are not planned through the dock
-    // NOR through the straight-line approach corridor that opennav_docking
-    // needs for the final 1.5 m alignment. Rectangle in dock local frame:
-    //   +X (into dock structure): dock_forward (covers robot when docked)
-    //   -X (approach corridor)  : dock_approach_corridor_length_m_
-    //   ±Y                      : dock_approach_corridor_half_width_m_
-    // This is asymmetric — the robot must stay out of the approach lane so
-    // it always reaches staging pose with the correct heading, but we still
-    // cover the dock structure itself.
-    const double dock_forward = 0.45;  // +X extent into dock (was symmetric)
-    const double approach_back = dock_approach_corridor_length_m_;
-    const double half_width = dock_approach_corridor_half_width_m_;
+    // Build the three coupled dock polygons. All three rectangles live in
+    // the dock's local frame (origin at docking_pose_, +X forward) and are
+    // rotated into the map frame using d_yaw.
+    //
+    //   * body     — physical dock structure: from -dock_body_length_m
+    //                (rear of body, behind dock origin) to 0 along +X,
+    //                ±dock_body_width_m/2 along Y. Marks OBSTACLE_PERMANENT.
+    //   * corridor — approach lane: from -approach_back to
+    //                -dock_body_length_m along +X (i.e. immediately behind
+    //                the body), ±half_width along Y. Marks DOCKING_AREA,
+    //                carved out of keepout mask.
+    //   * exclusion — union (-approach_back to 0, ±max half-widths). Kept
+    //                 for visualization / GUI overlay only.
+    //
+    // Convention: dock_pose_ is the *docked-robot* pose (front of robot
+    // touching the dock). +X in dock-local frame points AWAY from the dock
+    // (the staging direction); the body sits in -X, behind the docked
+    // robot's reference point. The corridor extends further in -X.
+    const double body_len = dock_body_length_m_;
+    const double body_half_width = 0.5 * dock_body_width_m_;
+    const double corridor_back = dock_approach_corridor_length_m_;
+    const double corridor_half_width = dock_approach_corridor_half_width_m_;
     const double d_x = docking_pose_.position.x;
     const double d_y = docking_pose_.position.y;
     const double d_yaw = 2.0 * std::atan2(docking_pose_.orientation.z, docking_pose_.orientation.w);
     const double cy = std::cos(d_yaw);
     const double sy = std::sin(d_yaw);
-    const double corners[][2] = {
-        {dock_forward, half_width},
-        {dock_forward, -half_width},
-        {-approach_back, -half_width},
-        {-approach_back, half_width},
-    };
-    for (const auto& c : corners)
+
+    auto append_rect = [&](geometry_msgs::msg::Polygon& poly,
+                           double x_min,
+                           double x_max,
+                           double y_half)
     {
-      geometry_msgs::msg::Point32 pt;
-      pt.x = static_cast<float>(d_x + cy * c[0] - sy * c[1]);
-      pt.y = static_cast<float>(d_y + sy * c[0] + cy * c[1]);
-      pt.z = 0.0f;
-      dock_exclusion_polygon_.points.push_back(pt);
-    }
-    dock_exclusion_polygon_.points.push_back(dock_exclusion_polygon_.points.front());
+      const double corners[][2] = {
+          {x_max, y_half},
+          {x_max, -y_half},
+          {x_min, -y_half},
+          {x_min, y_half},
+      };
+      for (const auto& c : corners)
+      {
+        geometry_msgs::msg::Point32 pt;
+        pt.x = static_cast<float>(d_x + cy * c[0] - sy * c[1]);
+        pt.y = static_cast<float>(d_y + sy * c[0] + cy * c[1]);
+        pt.z = 0.0F;
+        poly.points.push_back(pt);
+      }
+      poly.points.push_back(poly.points.front());
+    };
+
+    append_rect(dock_body_polygon_, -body_len, 0.0, body_half_width);
+    append_rect(dock_corridor_polygon_, -corridor_back, -body_len, corridor_half_width);
+    append_rect(dock_exclusion_polygon_,
+                -corridor_back,
+                0.0,
+                std::max(body_half_width, corridor_half_width));
     has_dock_exclusion_ = true;
     RCLCPP_INFO(get_logger(),
-                "Dock exclusion zone (with approach corridor): pose=(%.2f, %.2f) "
-                "yaw=%.2f, forward=%.2fm, approach=%.2fm, half_width=%.2fm",
+                "Dock polygons: pose=(%.2f, %.2f) yaw=%.2f rad — "
+                "body %.2fm × %.2fm (OBSTACLE_PERMANENT), "
+                "corridor %.2fm × %.2fm (DOCKING_AREA, keepout carve-out)",
                 d_x,
                 d_y,
                 d_yaw,
-                dock_forward,
-                approach_back,
-                half_width);
+                body_len,
+                2.0 * body_half_width,
+                corridor_back - body_len,
+                2.0 * corridor_half_width);
   }
 
   // ── Publish timer ────────────────────────────────────────────────────────

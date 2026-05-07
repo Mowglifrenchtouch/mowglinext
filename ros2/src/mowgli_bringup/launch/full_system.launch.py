@@ -224,6 +224,17 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[
             map_params,
             {"use_sim_time": use_sim_time},
+            # Dock pose + body geometry from mowgli_robot.yaml. Without
+            # these the map_server uses C++ defaults (0,0,0) and builds
+            # an axis-aligned polygon at the map origin — wrong unless
+            # the dock happens to be exactly there. The hardware_bridge
+            # already receives the same dock_pose_*; here we forward to
+            # the planner / keepout-mask path too.
+            {"dock_pose_x": float(robot_params.get("dock_pose_x", 0.0))},
+            {"dock_pose_y": float(robot_params.get("dock_pose_y", 0.0))},
+            {"dock_pose_yaw": float(robot_params.get("dock_pose_yaw", 0.0))},
+            {"dock_body_length_m": float(robot_params.get("dock_body_length_m", 0.80))},
+            {"dock_body_width_m": float(robot_params.get("dock_body_width_m", 0.55))},
         ],
     )
 

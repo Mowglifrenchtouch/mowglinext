@@ -973,17 +973,44 @@ void MapServerNode::apply_area_classifications()
     }
   }
 
-  // Mark dock exclusion zone as NO_GO_ZONE — no mowing strips planned here.
-  if (has_dock_exclusion_ && dock_exclusion_polygon_.points.size() >= 3)
+  // Dock body cells → OBSTACLE_PERMANENT. The strip planner stops at
+  // OBSTACLE_PERMANENT, and Smac sees them as lethal — so the robot
+  // never tries to mow into or path through the dock structure.
+  if (has_dock_exclusion_ && dock_body_polygon_.points.size() >= 3)
   {
-    grid_map::Polygon dock_gm;
-    for (const auto& pt : dock_exclusion_polygon_.points)
+    const float body_val = static_cast<float>(CellType::OBSTACLE_PERMANENT);
+    grid_map::Polygon body_gm;
+    for (const auto& pt : dock_body_polygon_.points)
     {
-      dock_gm.addVertex(grid_map::Position(static_cast<double>(pt.x), static_cast<double>(pt.y)));
+      body_gm.addVertex(grid_map::Position(static_cast<double>(pt.x), static_cast<double>(pt.y)));
     }
-    for (grid_map::PolygonIterator it(map_, dock_gm); !it.isPastEnd(); ++it)
+    for (grid_map::PolygonIterator it(map_, body_gm); !it.isPastEnd(); ++it)
     {
-      map_.at(std::string(layers::CLASSIFICATION), *it) = no_go_val;
+      map_.at(std::string(layers::CLASSIFICATION), *it) = body_val;
+    }
+  }
+
+  // Dock approach corridor → DOCKING_AREA. Mowable (strips can traverse),
+  // but flagged so the keepout-mask carve-out and reachability analysis
+  // can identify these cells. Skip cells already marked OBSTACLE_PERMANENT
+  // (body) so the body classification wins where the polygons touch.
+  if (has_dock_exclusion_ && dock_corridor_polygon_.points.size() >= 3)
+  {
+    const float corridor_val = static_cast<float>(CellType::DOCKING_AREA);
+    const float perm_val = static_cast<float>(CellType::OBSTACLE_PERMANENT);
+    grid_map::Polygon corridor_gm;
+    for (const auto& pt : dock_corridor_polygon_.points)
+    {
+      corridor_gm.addVertex(
+          grid_map::Position(static_cast<double>(pt.x), static_cast<double>(pt.y)));
+    }
+    auto& cls = map_[std::string(layers::CLASSIFICATION)];
+    for (grid_map::PolygonIterator it(map_, corridor_gm); !it.isPastEnd(); ++it)
+    {
+      if (cls((*it)(0), (*it)(1)) != perm_val)
+      {
+        cls((*it)(0), (*it)(1)) = corridor_val;
+      }
     }
   }
 }
