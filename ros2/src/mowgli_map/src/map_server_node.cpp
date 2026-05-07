@@ -85,6 +85,16 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options)
   mow_angle_override_deg_ =
       declare_parameter<double>("mow_angle_deg", std::numeric_limits<double>::quiet_NaN());
 
+  // Bypass-arc tuning (cleaning-robot detour around discrete obstacles).
+  // chassis_width sets the lateral-offset basis; bypass_safety_margin
+  // adds clearance on top; bypass_max_length is the give-up threshold
+  // along the row (anything longer is treated as a wall, not an obstacle).
+  // The give-up threshold reads max_obstacle_avoidance_distance from
+  // mowgli_robot.yaml so it lives alongside other physical params.
+  chassis_width_m_ = declare_parameter<double>("chassis_width", 0.40);
+  bypass_safety_margin_m_ = declare_parameter<double>("bypass_safety_margin_m", 0.05);
+  bypass_max_length_m_ = declare_parameter<double>("max_obstacle_avoidance_distance", 2.0);
+
   // Dock body (physical structure the robot cannot drive into). Cells
   // inside are marked OBSTACLE_PERMANENT — F2C strips stop at the body
   // edge and Smac treats them as lethal. Defaults match the YardForce500

@@ -1158,6 +1158,7 @@ protected:
     bool is_long_transit{};
     bool coverage_complete{};
     bool ok{};
+    std::vector<std::pair<double, double>> via_points{};
   };
   SegOut select(double rx, double ry, double r_yaw = 0.0, double prefer_dir = 0.0)
   {
@@ -1177,7 +1178,8 @@ protected:
                                            o.cell_count,
                                            o.reason,
                                            o.is_long_transit,
-                                           o.coverage_complete);
+                                           o.coverage_complete,
+                                           &o.via_points);
     return o;
   }
 
@@ -1305,6 +1307,80 @@ TEST_F(CoverageCellScenarioTest, DockExclusionIsSkipped)
   EXPECT_FALSE(o.coverage_complete);
   const double start_dist = std::hypot(o.start_x, o.start_y);
   EXPECT_GT(start_dist, 0.15);
+}
+
+// Bypass arc tests — the cleaning-robot detour. When the row-walk
+// hits a discrete obstacle blob, the planner should generate a
+// detour around it (lateral offset + forward + return) instead of
+// terminating the segment at the obstacle.
+
+TEST_F(CoverageCellScenarioTest, BypassesDiscretePermanentObstacleOnRow)
+{
+  // Tight 0.4×0.4 m permanent obstacle centred at (1.0, 0.0). With the
+  // robot starting at (-1.0, 0.0) and prefer_dir = 0 (along +X), the
+  // row hits the obstacle around x≈0.8 and should detour to the offset
+  // row, march past, and resume at x≈1.2.
+  {
+    std::lock_guard<std::mutex> lock(node_->map_mutex());
+    for (double x = 0.8; x <= 1.2 + 1e-9; x += 0.05)
+      for (double y = -0.2; y <= 0.2 + 1e-9; y += 0.05)
+        set_classification(x, y, mowgli_map::CellType::OBSTACLE_PERMANENT);
+  }
+
+  auto o = select(-1.0, 0.0, /*r_yaw=*/0.0, /*prefer_dir=*/0.0);
+  ASSERT_TRUE(o.ok);
+  EXPECT_FALSE(o.coverage_complete);
+  // Bypass should have produced 3 corner points: lateral out, offset
+  // far, lateral return.
+  EXPECT_EQ(o.via_points.size(), 3u);
+  // Segment must end past the obstacle on the row (x > 1.2 with some
+  // tolerance for the resume cell granularity).
+  EXPECT_GT(o.end_x, 1.2);
+  // End remains on the original row line (|y| ~ 0).
+  EXPECT_LT(std::fabs(o.end_y), 0.10);
+  // First via point pivots laterally off the row at the obstacle entry —
+  // its |y| must be at least the bypass safety offset (chassis_width/2 +
+  // safety_margin = 0.20 + 0.05 = 0.25 m).
+  EXPECT_GT(std::fabs(o.via_points[0].second), 0.20);
+}
+
+TEST_F(CoverageCellScenarioTest, NoBypassWhenObstacleExceedsLengthBudget)
+{
+  // 3 m wide obstacle in u-direction — exceeds the default 2 m budget.
+  // Planner should give up on bypass and terminate the segment at the
+  // obstacle entry without via points.
+  {
+    std::lock_guard<std::mutex> lock(node_->map_mutex());
+    for (double x = 0.0; x <= 1.95 + 1e-9; x += 0.05)
+      for (double y = -0.2; y <= 0.2 + 1e-9; y += 0.05)
+        set_classification(x, y, mowgli_map::CellType::OBSTACLE_PERMANENT);
+  }
+
+  auto o = select(-1.5, 0.0, /*r_yaw=*/0.0, /*prefer_dir=*/0.0);
+  ASSERT_TRUE(o.ok);
+  EXPECT_TRUE(o.via_points.empty());
+  // Segment should terminate before reaching the obstacle blob
+  // (some tolerance for the resolution snap).
+  EXPECT_LT(o.end_x, 0.10);
+  EXPECT_EQ(o.reason, "obstacle");
+}
+
+TEST_F(CoverageCellScenarioTest, BypassesCostmapBlockedRegion)
+{
+  // No costmap is wired into the unit test node, so this case
+  // double-checks that classification-based blocking still triggers
+  // bypass when a costmap-only obstacle would also: an OBSTACLE_TEMPORARY
+  // cell-blob (which is_blocking treats identically) on a single column.
+  {
+    std::lock_guard<std::mutex> lock(node_->map_mutex());
+    for (double y = -0.15; y <= 0.15 + 1e-9; y += 0.05)
+      set_classification(0.5, y, mowgli_map::CellType::OBSTACLE_TEMPORARY);
+  }
+
+  auto o = select(-1.0, 0.0, /*r_yaw=*/0.0, /*prefer_dir=*/0.0);
+  ASSERT_TRUE(o.ok);
+  EXPECT_EQ(o.via_points.size(), 3u);
+  EXPECT_GT(o.end_x, 0.55);  // past the obstacle blob
 }
 
 TEST_F(CoverageCellScenarioTest, BoustrophedonJumpsToNextRow)

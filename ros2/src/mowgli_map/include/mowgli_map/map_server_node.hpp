@@ -153,7 +153,8 @@ public:
                                 int& out_cell_count,
                                 std::string& out_termination_reason,
                                 bool& out_is_long_transit,
-                                bool& out_coverage_complete) const;
+                                bool& out_coverage_complete,
+                                std::vector<std::pair<double, double>>* out_via_points = nullptr) const;
 
   /// Test-only: directly invoke the add_area service handler.
   void add_area_for_test(const mowgli_interfaces::srv::AddMowingArea::Request::SharedPtr req,
@@ -390,9 +391,16 @@ private:
     double start_x{0.0};
     double start_y{0.0};
     /// Final cell of the segment (last cell that will be mowed by
-    /// FollowSegment). Together with start, defines the path.
+    /// FollowSegment). Together with start (and via_points if any),
+    /// defines the path the controller will follow.
     double end_x{0.0};
     double end_y{0.0};
+    /// Optional intermediate waypoints between start_* and end_*. Empty
+    /// for straight in-row segments. Populated when the planner
+    /// generated a bypass arc around an obstacle: the via points are
+    /// the corners of the arc (lateral offset out, offset-row span,
+    /// lateral return). Path = start → via[0] → via[1] → ... → end.
+    std::vector<std::pair<double, double>> via_points{};
     /// Number of cells traversed by this segment (along path_spacing
     /// granularity). For diagnostics, used as segments_remaining
     /// estimate scaling.
@@ -506,6 +514,27 @@ private:
   /// transit through them post-undock.
   double dock_approach_corridor_length_m_{1.5};
   double dock_approach_corridor_half_width_m_{0.40};
+
+  /// Robot chassis width (m). Read from mowgli_robot.yaml so the bypass
+  /// arc planner uses the actual robot footprint when sizing the lateral
+  /// offset around discrete obstacles.
+  double chassis_width_m_{0.40};
+
+  /// Bypass-arc tuning knobs.
+  ///   bypass_safety_margin_m_  — extra clearance added to chassis_width/2
+  ///                              when offsetting around an obstacle.
+  ///                              0.05 m is enough to absorb FTC tracking
+  ///                              error without hitting collision_monitor.
+  ///   bypass_max_length_m_     — give-up threshold along the row. If the
+  ///                              obstacle's u-extent exceeds this, the
+  ///                              segment ends at the obstacle entry as
+  ///                              before — at that scale it's a wall, not
+  ///                              a discrete obstacle, and the next-row
+  ///                              scan will pick up the cells past it.
+  ///                              Reads max_obstacle_avoidance_distance
+  ///                              from mowgli_robot.yaml (default 2.0).
+  double bypass_safety_margin_m_{0.05};
+  double bypass_max_length_m_{2.0};
 
   // ── State ─────────────────────────────────────────────────────────────────
   grid_map::GridMap map_;

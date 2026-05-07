@@ -24,6 +24,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "mowgli_map/map_server_node.hpp"
@@ -725,6 +726,132 @@ inline RowBasis make_basis(double prefer_dir_yaw)
   b.vy = b.ux;
   return b;
 }
+
+// Find a bypass arc around the obstacle that just blocked the row
+// march. Tries both lateral sides (+v and -v at lateral_offset), picks
+// the one that returns to the row sooner. Returns true on success and
+// fills via points + u-resume position; returns false if neither side
+// is viable (offset cell blocked, both sides hit further obstacles, or
+// obstacle's u-extent exceeds max_bypass_u_length).
+//
+// Path layout when successful (all in basis coords):
+//   row segment up to (u_entry - dir·step, v_row)        [already in start..end]
+//   via 1: (u_entry - dir·step, v_offset)                — lateral move out
+//   via 2: (u_resume,            v_offset)                — march at offset
+//   via 3: (u_resume,            v_row)                   — lateral return
+//   row continues from u_resume (caller advances walk_u and re-enters loop)
+//
+// Scoring: total path length on the arc (lateral·2 + along-u length).
+// The lateral component is identical between sides so the picker
+// effectively chooses the side that resumes the row at the smaller
+// |u_resume - u_entry| — which is exactly "shorter-resume side".
+template <typename MowableUnmowedFn, typename BlockingFn>
+inline bool find_bypass_arc(const RowBasis& b,
+                                 double u_entry,
+                                 double v_row,
+                                 double dir,
+                                 double lateral_offset,
+                                 double max_bypass_u_length,
+                                 double step,
+                                 MowableUnmowedFn is_mowable_unmowed,
+                                 BlockingFn is_blocking,
+                                 std::vector<std::pair<double, double>>& out_via,
+                                 double& out_u_resume,
+                                 double& out_bypass_length)
+{
+  struct Candidate
+  {
+    int side;
+    double u_resume;
+    double via_in_x, via_in_y;
+    double via_out_x, via_out_y;
+    double via_resume_x, via_resume_y;
+    double length;
+  };
+  Candidate best{};
+  bool have_best = false;
+
+  // Try both sides; keep the shorter one.
+  for (int side : {+1, -1})
+  {
+    const double v_offset = v_row + static_cast<double>(side) * lateral_offset;
+
+    // The offset cell at the same u as the obstacle entry must itself
+    // be clear — otherwise we can't even sidestep onto the offset
+    // row.
+    {
+      double cx;
+      double cy;
+      basis_to_map(b, u_entry, v_offset, cx, cy);
+      std::string r;
+      if (is_blocking(cx, cy, r))
+        continue;
+    }
+
+    // March along u at v_offset; resume the original row as soon as
+    // (u, v_row) becomes mowable+unmowed AND not blocked. Bail out if
+    // the offset row itself hits an obstacle (this side is unviable;
+    // the obstacle wraps around).
+    double u = u_entry;
+    bool resumed = false;
+    while (std::fabs(u - u_entry) < max_bypass_u_length)
+    {
+      u += dir * step;
+      double offset_x;
+      double offset_y;
+      basis_to_map(b, u, v_offset, offset_x, offset_y);
+      std::string r;
+      if (is_blocking(offset_x, offset_y, r))
+        break;
+
+      double row_x;
+      double row_y;
+      basis_to_map(b, u, v_row, row_x, row_y);
+      // Resume: the row cell past the obstacle is clear AND not yet
+      // mowed (so it's worth resuming). If the row has been mowed on
+      // the far side already, we keep marching at v_offset until we
+      // either find an unmowed row cell or hit our budget — that
+      // way the bypass doesn't leave the offset row prematurely on a
+      // long obstacle.
+      if (!is_blocking(row_x, row_y, r) && is_mowable_unmowed(row_x, row_y))
+      {
+        resumed = true;
+        break;
+      }
+    }
+    if (!resumed)
+      continue;
+
+    Candidate c{};
+    c.side = side;
+    c.u_resume = u;
+    // u_entry is the last clean cell along the row. The bypass pivots
+    // off that cell: lateral move to (u_entry, v_offset), forward
+    // march to (u_resume, v_offset), lateral return to (u_resume,
+    // v_row) which is where the row continues.
+    basis_to_map(b, u_entry, v_offset, c.via_in_x, c.via_in_y);
+    basis_to_map(b, u, v_offset, c.via_out_x, c.via_out_y);
+    basis_to_map(b, u, v_row, c.via_resume_x, c.via_resume_y);
+    c.length = std::fabs(u - u_entry) + 2.0 * lateral_offset;
+    if (!have_best || c.length < best.length)
+    {
+      best = c;
+      have_best = true;
+    }
+  }
+
+  if (!have_best)
+    return false;
+
+  out_via.clear();
+  out_via.emplace_back(best.via_in_x, best.via_in_y);
+  out_via.emplace_back(best.via_out_x, best.via_out_y);
+  out_via.emplace_back(best.via_resume_x, best.via_resume_y);
+  out_u_resume = best.u_resume;
+  out_bypass_length = best.length;
+  return true;
+}
+
 }  // namespace
 
 bool MapServerNode::find_next_segment(size_t area_index,
@@ -936,28 +1063,98 @@ bool MapServerNode::find_next_segment(size_t area_index,
   out_seg.start_y = start_y;
 
   // ── 6. Walk along the row in dir until a stop condition fires ─────
+  //
+  // Bypass arcs: when the row hits a discrete obstacle (OBSTACLE_*,
+  // costmap blob, or LAWN_DEAD), try to detour around it and resume
+  // the row past the obstacle. This is the cleaning-robot behaviour:
+  // the robot mows the row, encounters a tree, hugs around it on
+  // whichever side gets back to the row sooner, and continues. Cells
+  // along the arc get marked mowed organically as the robot drives,
+  // so the obstacle ends up surrounded by a one-tool-width annulus
+  // of mowed grass — the queued perimeter pass closes the remaining
+  // gap.
+  //
+  // Hard-stop reasons that DON'T trigger bypass:
+  //   * "boundary" — outside the area polygon. No detour exists, by
+  //     definition. End the segment so the next call picks a new row.
+  //
+  // The bypass is rejected (and the row terminates as before) when:
+  //   * neither lateral side is reachable (offset cell itself blocked);
+  //   * the obstacle's u-extent exceeds bypass_max_length_m_ — at that
+  //     scale it's a wall, not a discrete obstacle, and the next-row
+  //     scan will pick up the cells on the other side cleanly;
+  //   * resuming the row past the bypass exit would require crossing
+  //     more obstacles or leaving the polygon.
+  const double bypass_lateral_offset = std::max(
+      0.5 * chassis_width_m_ + bypass_safety_margin_m_, row_pitch);
   double end_x = start_x;
   double end_y = start_y;
   std::string reason;
   int cells = 0;
   double walked = 0.0;
+  std::vector<std::pair<double, double>> via_points;
   while (walked < cap)
   {
-    walk_u += dir * step;
+    const double next_u = walk_u + dir * step;
     double cx, cy;
-    basis_to_map(B, walk_u, row_v, cx, cy);
+    basis_to_map(B, next_u, row_v, cx, cy);
     if (is_blocking(cx, cy, reason))
-      break;
+    {
+      // Boundaries don't get a bypass attempt — outside the polygon
+      // means no continuation by definition.
+      if (reason == "boundary")
+        break;
+
+      // Try a bypass arc around this obstacle. The helper returns the
+      // u-position past the obstacle if successful, plus the via
+      // points to insert (in map frame). On failure (neither side
+      // viable), it leaves via_local empty and we honour the original
+      // hard stop.
+      std::vector<std::pair<double, double>> via_local;
+      double u_resume = 0.0;
+      double bypass_length = 0.0;
+      const double bypass_budget_remaining = std::max(0.0, cap - walked);
+      const bool bypassed = find_bypass_arc(B,
+                                            walk_u,
+                                            row_v,
+                                            dir,
+                                            bypass_lateral_offset,
+                                            std::min(bypass_max_length_m_, bypass_budget_remaining),
+                                            step,
+                                            is_mowable_unmowed,
+                                            is_blocking,
+                                            via_local,
+                                            u_resume,
+                                            bypass_length);
+      if (!bypassed)
+        break;
+
+      // Commit the arc: append corner points, advance the row cursor
+      // past the obstacle. The current end (before the obstacle stays
+      // (end_x, end_y) — the via points fan out from there. The new
+      // end is the row resume point.
+      for (const auto& vp : via_local)
+        via_points.push_back(vp);
+      walk_u = u_resume;
+      basis_to_map(B, walk_u, row_v, end_x, end_y);
+      walked += bypass_length;
+      reason.clear();
+      // Advance one step past the resume point in the next loop iter
+      // so the cell at u_resume itself gets validated and marked.
+      continue;
+    }
     end_x = cx;
     end_y = cy;
     ++cells;
     walked += step;
+    walk_u = next_u;
   }
   if (reason.empty())
     reason = walked >= cap ? "max_length" : "row_end";
 
   out_seg.end_x = end_x;
   out_seg.end_y = end_y;
+  out_seg.via_points = std::move(via_points);
   out_seg.cell_count = cells;
   out_seg.termination_reason = reason;
 
@@ -1019,30 +1216,51 @@ void MapServerNode::on_get_next_segment(
     return;
   }
 
-  // Build path: dense linspace from start to end at resolution_ steps.
+  // Build the path as a polyline through start → via_points... → end.
+  // Empty via_points = straight in-row segment (the common case). With
+  // bypass arc, via_points carry the arc corners and the path becomes
+  // multi-leg, with each leg's poses oriented along its own direction
+  // so FTC's PRE_ROTATE aligns at every corner.
   nav_msgs::msg::Path path;
   path.header.stamp = now();
   path.header.frame_id = map_frame_;
-  const double dx = seg.end_x - seg.start_x;
-  const double dy = seg.end_y - seg.start_y;
-  const double length = std::hypot(dx, dy);
-  const int n_steps = std::max(1, static_cast<int>(std::ceil(length / resolution_)));
-  const double seg_yaw = std::atan2(dy, dx);
-  for (int i = 0; i <= n_steps; ++i)
+  std::vector<std::pair<double, double>> corners;
+  corners.reserve(2 + seg.via_points.size());
+  corners.emplace_back(seg.start_x, seg.start_y);
+  for (const auto& vp : seg.via_points)
+    corners.push_back(vp);
+  corners.emplace_back(seg.end_x, seg.end_y);
+  for (size_t i = 0; i + 1 < corners.size(); ++i)
   {
-    const double t = static_cast<double>(i) / n_steps;
-    geometry_msgs::msg::PoseStamped p;
-    p.header = path.header;
-    p.pose.position.x = seg.start_x + t * dx;
-    p.pose.position.y = seg.start_y + t * dy;
-    p.pose.position.z = 0.0;
-    // Orient each pose along the segment direction so FTC's
-    // PRE_ROTATE phase aligns the robot before driving.
-    p.pose.orientation.x = 0.0;
-    p.pose.orientation.y = 0.0;
-    p.pose.orientation.z = std::sin(seg_yaw / 2.0);
-    p.pose.orientation.w = std::cos(seg_yaw / 2.0);
-    path.poses.push_back(p);
+    const double sx = corners[i].first;
+    const double sy = corners[i].second;
+    const double ex = corners[i + 1].first;
+    const double ey = corners[i + 1].second;
+    const double dx = ex - sx;
+    const double dy = ey - sy;
+    const double length = std::hypot(dx, dy);
+    if (length < 1e-6)
+      continue;
+    const int n_steps = std::max(1, static_cast<int>(std::ceil(length / resolution_)));
+    const double leg_yaw = std::atan2(dy, dx);
+    // First leg includes its starting pose; subsequent legs skip step 0
+    // because that point is the previous leg's terminal pose, already
+    // pushed.
+    const int j_start = (i == 0) ? 0 : 1;
+    for (int j = j_start; j <= n_steps; ++j)
+    {
+      const double t = static_cast<double>(j) / n_steps;
+      geometry_msgs::msg::PoseStamped p;
+      p.header = path.header;
+      p.pose.position.x = sx + t * dx;
+      p.pose.position.y = sy + t * dy;
+      p.pose.position.z = 0.0;
+      p.pose.orientation.x = 0.0;
+      p.pose.orientation.y = 0.0;
+      p.pose.orientation.z = std::sin(leg_yaw / 2.0);
+      p.pose.orientation.w = std::cos(leg_yaw / 2.0);
+      path.poses.push_back(p);
+    }
   }
 
   res->success = true;
@@ -1086,21 +1304,23 @@ void MapServerNode::on_get_next_segment(
 // Test wrapper for find_next_segment — flattens SegmentResult into
 // scalar out-params so unit tests can call the selector without
 // pulling the struct definition. Caller holds map_mutex_.
-bool MapServerNode::find_next_segment_public(size_t area_index,
-                                             double robot_x,
-                                             double robot_y,
-                                             double robot_yaw,
-                                             double prefer_dir_yaw,
-                                             bool boustrophedon,
-                                             double max_segment_length_m,
-                                             double& out_start_x,
-                                             double& out_start_y,
-                                             double& out_end_x,
-                                             double& out_end_y,
-                                             int& out_cell_count,
-                                             std::string& out_termination_reason,
-                                             bool& out_is_long_transit,
-                                             bool& out_coverage_complete) const
+bool MapServerNode::find_next_segment_public(
+    size_t area_index,
+    double robot_x,
+    double robot_y,
+    double robot_yaw,
+    double prefer_dir_yaw,
+    bool boustrophedon,
+    double max_segment_length_m,
+    double& out_start_x,
+    double& out_start_y,
+    double& out_end_x,
+    double& out_end_y,
+    int& out_cell_count,
+    std::string& out_termination_reason,
+    bool& out_is_long_transit,
+    bool& out_coverage_complete,
+    std::vector<std::pair<double, double>>* out_via_points) const
 {
   SegmentResult seg;
   const bool ok = find_next_segment(area_index,
@@ -1119,6 +1339,8 @@ bool MapServerNode::find_next_segment_public(size_t area_index,
   out_termination_reason = seg.termination_reason;
   out_is_long_transit = seg.is_long_transit;
   out_coverage_complete = seg.coverage_complete;
+  if (out_via_points)
+    *out_via_points = seg.via_points;
   return ok;
 }
 

@@ -235,6 +235,13 @@ def generate_launch_description() -> LaunchDescription:
             {"dock_pose_yaw": float(robot_params.get("dock_pose_yaw", 0.0))},
             {"dock_body_length_m": float(robot_params.get("dock_body_length_m", 0.80))},
             {"dock_body_width_m": float(robot_params.get("dock_body_width_m", 0.55))},
+            # Bypass-arc planner geometry — lifted from physical/operational
+            # sections of mowgli_robot.yaml so the cleaning-robot detour
+            # around discrete obstacles uses the correct robot footprint
+            # and the wall-vs-obstacle threshold operators tune per site.
+            {"chassis_width": float(robot_params.get("chassis_width", 0.40))},
+            {"max_obstacle_avoidance_distance":
+                float(robot_params.get("max_obstacle_avoidance_distance", 2.0))},
         ],
     )
 
