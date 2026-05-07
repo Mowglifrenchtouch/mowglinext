@@ -86,6 +86,15 @@ private:
   // Cold-boot relocalization state.
   bool autoload_succeeded_ = false;
   bool relocalize_done_ = false;
+  // Set true once an RTK-Fixed GPS sample has overridden the autoloaded
+  // pose with ForceAnchor. One-shot per boot — subsequent RTK fixes flow
+  // through as normal GnssLeverArmFactor observations.
+  bool rtk_autoload_override_done_ = false;
+  // Distance threshold (m) above which an RTK-Fixed GPS sample is
+  // considered to disagree with the autoloaded pose enough to force a
+  // re-anchor. Below this, the autoloaded pose is trusted and GPS just
+  // contributes factors normally.
+  double rtk_autoload_override_threshold_m_ = 0.3;
   double dock_pose_yaw_ = 0.0;
 
   // Latched datum (read from parameters at startup).

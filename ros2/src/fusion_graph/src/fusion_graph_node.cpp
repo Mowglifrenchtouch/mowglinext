@@ -150,6 +150,16 @@ FusionGraphNode::FusionGraphNode(const rclcpp::NodeOptions& opts)
   // a tight prior.
   dock_pose_yaw_ = declare_parameter<double>("dock_pose_yaw", 0.0);
 
+  // RTK-Fixed override of the autoloaded pose: if the autoloaded graph
+  // disagrees with the first incoming RTK-Fixed sample by more than this
+  // many metres, force a re-anchor at the GPS pose. Handles the case of
+  // booting away from the dock — the persisted graph's last node is
+  // typically the dock, so without this the published map→odom would
+  // claim the robot is on the dock until the optimizer slowly walks the
+  // trajectory over.
+  rtk_autoload_override_threshold_m_ =
+      declare_parameter<double>("rtk_autoload_override_threshold_m", 0.3);
+
   if (autoload)
   {
     if (graph_->Load(graph_save_prefix_))
@@ -568,6 +578,54 @@ void FusionGraphNode::OnGnss(sensor_msgs::msg::NavSatFix::ConstSharedPtr msg)
   // (re)initialization, so the freshness window is the same as the
   // seed itself.
   seed_xy_rtk_fixed_ = rtk_fixed;
+
+  // RTK-Fixed override of an autoloaded init: the persisted graph's last
+  // node is almost always the dock (auto-save fires on dock arrival), so
+  // booting away from the dock leaves IsInitialized()=true at the wrong
+  // pose and TrySeedInitialPose() short-circuits — GPS observations then
+  // fight the dock prior for many seconds before the trajectory walks
+  // over. RTK-Fixed is sub-cm and trustworthy: re-anchor the latest
+  // loaded node at the GPS pose with a tight prior. One-shot per boot.
+  if (rtk_fixed && autoload_succeeded_ && !rtk_autoload_override_done_ &&
+      graph_->IsInitialized())
+  {
+    auto snap = graph_->LatestSnapshot();
+    if (snap)
+    {
+      const double dx = mx - snap->pose.x();
+      const double dy = my - snap->pose.y();
+      const double dist = std::hypot(dx, dy);
+      if (dist > rtk_autoload_override_threshold_m_)
+      {
+        // Use the freshest yaw seed if we have one (COG/mag have already
+        // populated seed_yaw_ if they're alive); otherwise keep the
+        // autoloaded yaw — it's better than nothing and the next COG
+        // sample will pull it.
+        const double yaw = seed_yaw_.value_or(snap->pose.theta());
+        const gtsam::Pose2 anchor(mx, my, yaw);
+        // σ=5mm matches RTK-Fixed reported precision; σ_yaw 5° is loose
+        // enough to let COG correct it without fighting if the
+        // autoloaded yaw is wrong.
+        graph_->ForceAnchor(snap->node_index, anchor, 0.005, 5.0 * M_PI / 180.0);
+        rtk_autoload_override_done_ = true;
+        RCLCPP_WARN(get_logger(),
+                    "fusion_graph: RTK-Fixed override of autoloaded pose — "
+                    "re-anchored node %lu (%.2f, %.2f) → (%.2f, %.2f), Δ=%.2f m",
+                    static_cast<unsigned long>(snap->node_index),
+                    snap->pose.x(),
+                    snap->pose.y(),
+                    mx,
+                    my,
+                    dist);
+      }
+      else
+      {
+        // Within threshold — autoload is consistent with RTK, no
+        // override needed. Latch so we don't keep checking.
+        rtk_autoload_override_done_ = true;
+      }
+    }
+  }
 
   TrySeedInitialPose();
 }
