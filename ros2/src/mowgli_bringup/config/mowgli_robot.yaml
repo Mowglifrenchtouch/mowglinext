@@ -212,5 +212,12 @@ mowgli:
     # -----------------------------------------------------------------
     xy_goal_tolerance: 0.75        # metres — acceptable goal position error
     yaw_goal_tolerance: 1.0        # radians — acceptable heading error
-    coverage_xy_tolerance: 0.5     # metres — for coverage waypoints
+    # coverage_xy_tolerance MUST stay below mower_width (0.18 m). The
+    # SimpleGoalChecker (used by FollowCoveragePath) fires when the robot
+    # is within tolerance of the strip's END pose. Coverage strips are
+    # short (<3 m, often <0.5 m), so any value > strip length lets the
+    # controller declare 'reached' on tick 1 — the BT loops
+    # GetNextSegment forever without moving the robot. Field-broken
+    # 2026-05-08 with the old 0.5 m default.
+    coverage_xy_tolerance: 0.10    # metres — strict, below mower_width
     progress_timeout_sec: 60.0     # seconds without progress before recovery

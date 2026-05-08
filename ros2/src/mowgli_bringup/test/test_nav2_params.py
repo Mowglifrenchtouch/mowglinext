@@ -10,6 +10,7 @@
 # FTC started.
 """Regression tests for the nav2_params.yaml goal-checker tolerances."""
 import os
+import re
 
 import pytest
 import yaml
@@ -90,6 +91,82 @@ def test_followcoveragepath_uses_ftc() -> None:
     """
     cfg = _controller_section(_load_params())
     assert cfg["FollowCoveragePath"]["plugin"] == "mowgli_nav2_plugins/FTCController"
+
+
+# ── 2026-05-08 field bug: launch override + per-site yaml + no-lidar variant
+# all default coverage_xy_tolerance back to 0.5 m, silently re-breaking
+# coverage. The nav2_params.yaml fix above is necessary but not sufficient
+# — these tests guard the other three paths.
+
+def _read_text(rel_path: str) -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", rel_path), "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_navigation_launch_default_coverage_tolerance_is_tight() -> None:
+    """navigation.launch.py picks the runtime coverage_xy_tolerance
+    from mowgli_robot.yaml, falling back to a hardcoded default. A
+    stale or missing mowgli_robot.yaml field then determines whether
+    mowing works. Pin the launch default <= mower_width.
+    """
+    src = _read_text("launch/navigation.launch.py")
+    m = re.search(r"coverage_xy_tolerance\s*=\s*([\d\.]+)", src)
+    assert m, "Could not find coverage_xy_tolerance default in navigation.launch.py"
+    default = float(m.group(1))
+    assert default <= 0.20, (
+        f"navigation.launch.py default coverage_xy_tolerance={default} m. "
+        "If a per-site mowgli_robot.yaml omits this key, the launch falls back "
+        "to this default and FTC will declare every short strip 'reached' on "
+        "the first tick. Tighten to <= mower_width."
+    )
+
+
+def test_navigation_launch_clips_runaway_coverage_tolerance() -> None:
+    """A stale per-site mowgli_robot.yaml might still carry the legacy
+    0.5 m value. The launch script must clip — anything above ~0.15 m
+    silently regresses to the field-broken state.
+    """
+    src = _read_text("launch/navigation.launch.py")
+    # Look for an explicit clip in the launch script's coverage_xy_tolerance handling.
+    assert re.search(r"coverage_xy_tolerance\s*>\s*0\.\d+", src), (
+        "Expected a clip on coverage_xy_tolerance in navigation.launch.py "
+        "(e.g. `if coverage_xy_tolerance > 0.15: coverage_xy_tolerance = 0.15`). "
+        "Without it, a stale per-site YAML with 0.5 m re-breaks coverage."
+    )
+
+
+def test_mowgli_robot_yaml_default_coverage_tolerance_is_tight() -> None:
+    """The shipped mowgli_robot.yaml is the template per-site config gets
+    seeded from. If the shipped value is loose, every fresh install
+    inherits the bug.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "..", "config", "mowgli_robot.yaml")
+    with open(path, "r", encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+    tol = cfg["mowgli"]["ros__parameters"]["coverage_xy_tolerance"]
+    assert tol <= 0.20, (
+        f"mowgli_robot.yaml ships coverage_xy_tolerance={tol} m. "
+        "Fresh installs would copy this and silently break coverage."
+    )
+
+
+def test_no_lidar_variant_coverage_tolerance_is_tight() -> None:
+    """nav2_params_no_lidar.yaml is the GPS-only variant — same loose
+    tolerance regression risk as the main one.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, "..", "config", "nav2_params_no_lidar.yaml")
+    with open(path, "r", encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+    tol = cfg["controller_server"]["ros__parameters"]["coverage_goal_checker"][
+        "xy_goal_tolerance"
+    ]
+    assert tol <= 0.20, (
+        f"nav2_params_no_lidar.yaml has coverage_goal_checker.xy_goal_tolerance={tol} m. "
+        "Same field bug as the LiDAR variant — tighten to <= mower_width."
+    )
 
 
 if __name__ == "__main__":

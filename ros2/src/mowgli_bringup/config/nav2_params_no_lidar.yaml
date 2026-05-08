@@ -78,7 +78,11 @@ controller_server:
 
     coverage_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.5
+      # See nav2_params.yaml for the full story — anything > mower_width
+      # (0.18 m) makes FTC declare 'goal reached' on the first tick of
+      # short cell-based strips, BT loops GetNextSegment forever, robot
+      # never moves. Field-broken 2026-05-08.
+      xy_goal_tolerance: 0.10
       yaw_goal_tolerance: 6.28
       stateful: true
 

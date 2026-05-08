@@ -272,7 +272,15 @@ def generate_launch_description() -> LaunchDescription:
     # into the rewritten Nav2 yaml below alongside the speeds.
     xy_goal_tolerance = 0.30
     yaw_goal_tolerance = 0.5
-    coverage_xy_tolerance = 0.5
+    # coverage_xy_tolerance must stay below mower_width (0.18 m). The
+    # SimpleGoalChecker fires the moment the robot is within tolerance
+    # of the GOAL pose. Cell-based GetNextSegment returns short strips
+    # (often <0.5 m near the robot's current pose) — anything above
+    # ~0.15 m means the controller declares 'reached' on tick 1 and
+    # the BT loops GetNextSegment forever without moving the robot.
+    # Field bug 2026-05-08: was 0.5 m, robot stuck at <1 % coverage.
+    # Override per site via mowgli_robot.yaml.coverage_xy_tolerance.
+    coverage_xy_tolerance = 0.10
     progress_timeout_sec = 300.0
     # Phantom-tuning knobs surfaced through mowgli_robot.yaml so the GUI
     # can edit them without an SSH session. Defaults match the C++ node
@@ -301,6 +309,20 @@ def generate_launch_description() -> LaunchDescription:
             rt_rp.get("yaw_goal_tolerance", yaw_goal_tolerance))
         coverage_xy_tolerance = float(
             rt_rp.get("coverage_xy_tolerance", coverage_xy_tolerance))
+        # Defensive clip: a stale per-site mowgli_robot.yaml can carry
+        # the legacy 0.5 m default that breaks cell-based mowing (the
+        # SimpleGoalChecker fires on tick 1 because the strip end is
+        # within tolerance of the robot's current pose, FTC reports
+        # SUCCEEDED before publishing any cmd_vel, BT loops forever).
+        # Cap at 0.15 m here so a forgotten YAML field can't reproduce
+        # the field bug on a fresh deploy.
+        if coverage_xy_tolerance > 0.15:
+            print(
+                "WARN: coverage_xy_tolerance={} m exceeds the 0.15 m safe ceiling "
+                "(strips would 'complete' before the robot moves). Clipping to 0.15. "
+                "Update mowgli_robot.yaml.coverage_xy_tolerance to silence.".format(
+                    coverage_xy_tolerance))
+            coverage_xy_tolerance = 0.15
         progress_timeout_sec = float(
             rt_rp.get("progress_timeout_sec", progress_timeout_sec))
         dock_pose_yaw_sigma_rad = float(rt_rp.get(

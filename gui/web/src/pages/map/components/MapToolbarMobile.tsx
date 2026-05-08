@@ -32,6 +32,7 @@ import {
     CaretRightOutlined,
     ThunderboltOutlined,
     CheckOutlined,
+    ImportOutlined,
 } from "@ant-design/icons";
 import type {MenuInfo} from "rc-menu/lib/interface";
 import AsyncButton from "../../../components/AsyncButton.tsx";
@@ -63,6 +64,7 @@ interface MapToolbarMobileProps {
     onRestoreMap: () => void;
     onDownloadGeoJSON: () => void;
     onUploadGeoJSON: () => void;
+    onImportOpenMower: () => void;
     onMowArea: (key: string) => Promise<void>;
     selectedFeatureCount?: number;
     onEditSelectedFeature?: () => void;
@@ -96,7 +98,7 @@ export const MapToolbarMobile = ({
     historyIndex, editHistoryLength, mowingAreas,
     onEditMap, onSaveMap, onUndo, onRedo, onToggleSatellite,
     onManualMode, onStopManualMode,
-    onBackupMap, onRestoreMap, onDownloadGeoJSON, onUploadGeoJSON,
+    onBackupMap, onRestoreMap, onDownloadGeoJSON, onUploadGeoJSON, onImportOpenMower,
     onMowArea, selectedFeatureCount = 0, onEditSelectedFeature,
     onDrawPolygon, onDrawShape, onDrawEmoji, onTrash, onCombine, onSubtract, onSplit,
     onPlaceDock, dockPlacementMode,
@@ -160,6 +162,7 @@ export const MapToolbarMobile = ({
         {type: "divider"},
         {key: "backup", icon: <DatabaseOutlined />, label: "Backup Map"},
         {key: "restore", icon: <DatabaseOutlined />, label: "Restore Map"},
+        {key: "importOpenMower", icon: <ImportOutlined />, label: "Import from OpenMower"},
         {type: "divider"},
         {key: "download", icon: <DownloadOutlined />, label: "Download GeoJSON"},
         ...(editMap
@@ -180,6 +183,7 @@ export const MapToolbarMobile = ({
             case "bladeOff": safeCall(onBladeOff); break;
             case "backup": onBackupMap(); break;
             case "restore": onRestoreMap(); break;
+            case "importOpenMower": onImportOpenMower(); break;
             case "download": onDownloadGeoJSON(); break;
             case "upload": onUploadGeoJSON(); break;
         }

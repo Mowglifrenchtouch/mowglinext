@@ -23,7 +23,8 @@ import {useMapBearing} from "./map/hooks/useMapBearing.ts";
 import {useManualMode} from "./map/hooks/useManualMode.ts";
 import {useMapEditing} from "./map/hooks/useMapEditing.ts";
 import {useMapStreams} from "./map/hooks/useMapStreams.ts";
-import {useMapFiles} from "./map/hooks/useMapFiles.ts";
+import {useMapFiles, type ImportOpenMowerSummary} from "./map/hooks/useMapFiles.ts";
+import {ImportOpenMowerModal} from "./map/components/ImportOpenMowerModal.tsx";
 import {NewAreaModal} from "./map/components/NewAreaModal.tsx";
 import {EditAreaModal} from "./map/components/EditAreaModal.tsx";
 import {AreasListPanel} from "./map/components/AreasListPanel.tsx";
@@ -55,6 +56,9 @@ export const MapPage: React.FC<{compact?: boolean}> = ({compact = false}) => {
     const [editMap, setEditMap] = useState<boolean>(false)
     const [features, setFeatures] = useState<Record<string, MowingFeature>>({});
     const [dockPlacementMode, setDockPlacementMode] = useState<boolean>(false);
+    // OpenMower import preview — populated by handleImportOpenMower after
+    // the file is uploaded + parsed server-side. Modal renders when set.
+    const [importPreview, setImportPreview] = useState<ImportOpenMowerSummary | null>(null);
     // Track whether the user actually moved the dock during this edit
     // session. The dock feature is rebuilt from the live /map topic on
     // every render, and saving without this flag would clobber the
@@ -420,6 +424,7 @@ export const MapPage: React.FC<{compact?: boolean}> = ({compact = false}) => {
         handleRestoreMap,
         handleDownloadGeoJSON,
         handleUploadGeoJSON,
+        handleImportOpenMower,
     } = useMapFiles({
         features,
         setFeatures,
@@ -845,6 +850,7 @@ export const MapPage: React.FC<{compact?: boolean}> = ({compact = false}) => {
                         onRestoreMap={handleRestoreMap}
                         onDownloadGeoJSON={handleDownloadGeoJSON}
                         onUploadGeoJSON={handleUploadGeoJSON}
+                        onImportOpenMower={() => handleImportOpenMower(setImportPreview)}
                         onMowArea={(key) => {
                             const item = mowingAreas.find(item => item.key == key)
                             return mowerAction("start_in_area", {
@@ -895,6 +901,7 @@ export const MapPage: React.FC<{compact?: boolean}> = ({compact = false}) => {
                             onBackupMap={handleBackupMap}
                             onRestoreMap={handleRestoreMap}
                             onDownloadGeoJSON={handleDownloadGeoJSON}
+                            onImportOpenMower={() => handleImportOpenMower(setImportPreview)}
                             onMowArea={(key) => {
                                 const item = mowingAreas.find(item => item.key == key)
                                 return mowerAction("start_in_area", {
@@ -936,6 +943,10 @@ export const MapPage: React.FC<{compact?: boolean}> = ({compact = false}) => {
                     </div>
                 )}
             </div>
+            <ImportOpenMowerModal
+                preview={importPreview}
+                onClose={() => setImportPreview(null)}
+            />
         </div>
     );
 }
