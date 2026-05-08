@@ -60,13 +60,15 @@ configure_gps() {
 
   # If preset values exist (from web composer or CLI), skip interactive prompts
   if [[ "${PRESET_LOADED:-false}" == "true" && -n "${GNSS_BACKEND:-}" && -n "${GPS_CONNECTION:-}" && -n "${GPS_PROTOCOL:-}" ]]; then
-    case "${GNSS_BACKEND}" in
-      gps|ublox|unicore|nmea) ;;
-      *)
-        error "Invalid GNSS_BACKEND preset: ${GNSS_BACKEND} (expected: gps, ublox, unicore, nmea)"
-        return 1
-        ;;
-    esac
+    if ! is_supported_gnss_backend "${GNSS_BACKEND}"; then
+      error "Invalid GNSS_BACKEND preset: ${GNSS_BACKEND} (expected: $(list_supported_gnss_backends))"
+      return 1
+    fi
+
+    if [[ "$(effective_gnss_backend "${GNSS_BACKEND}")" == "disabled" ]]; then
+      info "Direct GNSS configuration disabled for HARDWARE_BACKEND=${HARDWARE_BACKEND:-mowgli}"
+      return 0
+    fi
 
     : "${GPS_PORT:=/dev/gps}"
     : "${GPS_BY_ID:=}"
@@ -92,6 +94,11 @@ configure_gps() {
       GPS_DEBUG_UART_DEVICE="$REPLY"
     fi
   else
+    if [[ "$(effective_gnss_backend)" == "disabled" ]]; then
+      info "Direct GNSS configuration disabled for HARDWARE_BACKEND=${HARDWARE_BACKEND:-mowgli}"
+      return 0
+    fi
+
     echo ""
     echo "Select GNSS backend:"
     echo "  1) Generic GPS (legacy, UBX-only despite the name)"

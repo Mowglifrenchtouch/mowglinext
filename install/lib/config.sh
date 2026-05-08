@@ -28,6 +28,81 @@ GUI_IMAGE_DEFAULT="ghcr.io/cedbossneo/mowglinext/mowglinext-gui:${IMAGE_TAG}"
 CHECK_ONLY=false
 CLI_PRESET=false
 
+list_supported_gnss_backends() {
+  local backends="gps ublox unicore nmea"
+  if [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]; then
+    printf '%s disabled\n' "$backends"
+  else
+    printf '%s\n' "$backends"
+  fi
+}
+
+is_supported_gnss_backend() {
+  local backend="${1:-}"
+
+  case "$backend" in
+    gps|ublox|unicore|nmea)
+      return 0
+      ;;
+    disabled)
+      [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]
+      return
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+effective_gnss_backend() {
+  local backend="${1:-${GNSS_BACKEND:-gps}}"
+
+  if [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]; then
+    printf 'disabled\n'
+    return 0
+  fi
+
+  printf '%s\n' "$backend"
+  is_supported_gnss_backend "$backend"
+}
+
+compose_gnss_service_name() {
+  local backend="${1:-$(effective_gnss_backend)}"
+
+  case "$backend" in
+    gps)
+      printf 'gps\n'
+      ;;
+    ublox)
+      printf 'gnss_ublox\n'
+      ;;
+    unicore)
+      printf 'gnss_unicore\n'
+      ;;
+    nmea)
+      printf 'gnss_nmea\n'
+      ;;
+    disabled)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+compose_gnss_container_name() {
+  local backend="${1:-$(effective_gnss_backend)}"
+  local service_name
+
+  service_name="$(compose_gnss_service_name "$backend" 2>/dev/null || true)"
+  if [ -z "$service_name" ]; then
+    return 0
+  fi
+
+  printf 'mowgli-gps\n'
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,11 +116,11 @@ parse_args() {
         CLI_PRESET=true
         local gnss_spec="${1#*=}"
         case "$gnss_spec" in
-          gps|ublox|unicore)
+          gps|ublox|unicore|nmea)
             GNSS_BACKEND="$gnss_spec"
             ;;
           *)
-            error "Unknown GNSS backend: $gnss_spec (expected gps|ublox|unicore)"
+            error "Unknown GNSS backend: $gnss_spec (expected gps|ublox|unicore|nmea)"
             exit 1
             ;;
         esac
@@ -497,13 +572,21 @@ auto_detect_position() {
     return
   fi
 
+  local gnss_backend
+  local gps_container
+  local gnss_service
+
+  gnss_backend="$(effective_gnss_backend 2>/dev/null || true)"
+  gps_container="$(compose_gnss_container_name "$gnss_backend" 2>/dev/null || true)"
+  gnss_service="$(compose_gnss_service_name "$gnss_backend" 2>/dev/null || true)"
+
   if ! docker_cmd inspect -f '{{.State.Status}}' mowgli-ros2 2>/dev/null | grep -q running; then
     warn "mowgli-ros2 container not running — cannot auto-detect"
     add_issue "Set datum_lat and datum_lon manually in config/mowgli/mowgli_robot.yaml"
     return
   fi
 
-  if ! docker_cmd inspect -f '{{.State.Status}}' mowgli-gps 2>/dev/null | grep -q running; then
+  if [ -z "$gps_container" ] || ! docker_cmd inspect -f '{{.State.Status}}' "$gps_container" 2>/dev/null | grep -q running; then
     warn "GPS container not running — cannot auto-detect"
     add_issue "Set datum_lat and datum_lon manually in config/mowgli/mowgli_robot.yaml"
     return
@@ -564,7 +647,7 @@ auto_detect_position() {
   docker_compose_cmd \
     -f "$FINAL_COMPOSE_FILE" \
     --env-file "$FINAL_ENV_FILE" \
-    restart gps mowgli 2>&1 | tail -3
+    restart "${gnss_service:-gps}" mowgli 2>&1 | tail -3
   sleep 10
 }
 

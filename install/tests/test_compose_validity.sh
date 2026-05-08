@@ -4,7 +4,7 @@
 #
 # Validates the merged compose file via `docker compose config -q` and
 # spot-checks that the service blocks the user's preset implies are
-# actually present (mowgli, gui, gps/ublox/unicore, lidar, mavros, ntrip,
+# actually present (mowgli, gui, gps/ublox/unicore/nmea, lidar, mavros, ntrip,
 # tfluna_front/edge).
 # =============================================================================
 

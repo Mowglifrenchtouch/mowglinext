@@ -106,7 +106,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: curl -sSL https://mowgli.garden/install.sh | bash -s -- [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --gnss=BACKEND     GNSS driver: gps (legacy), ublox (F9P), unicore (UM98x)"
+      echo "  --gnss=BACKEND     GNSS driver: gps (legacy), ublox (F9P), unicore (UM98x), nmea (generic NMEA-0183)"
       echo "  --gps=PRESET       GPS protocol+wiring: ubx-usb, ubx-uart, nmea-usb, nmea-uart"
       echo "                     (ignored by --gnss=unicore — driver picks its own protocol)"
       echo "  --lidar=PRESET     LiDAR config: none, ldlidar-usb, ldlidar-uart,"
@@ -182,12 +182,12 @@ PRESET
   # ── GNSS backend preset ────────────────────────────────────────────────
   if [[ -n "$GNSS_FLAG" ]]; then
     case "$GNSS_FLAG" in
-      gps|ublox|unicore)
+      gps|ublox|unicore|nmea)
         echo "GNSS_BACKEND=${GNSS_FLAG}" >> "$PRESET_FILE"
         info "GNSS backend: $GNSS_FLAG"
         ;;
       *)
-        warn "Unknown GNSS backend: $GNSS_FLAG (expected gps|ublox|unicore) — will ask interactively"
+        warn "Unknown GNSS backend: $GNSS_FLAG (expected gps|ublox|unicore|nmea) — will ask interactively"
         ;;
     esac
   fi

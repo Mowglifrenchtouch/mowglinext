@@ -41,6 +41,8 @@ ensure_default_configs() {
 
 build_compose_stack() {
   COMPOSE_FILES=()
+  local gnss_backend
+  local gnss_service
 
   COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.base.yml")
   COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.gui.yml")
@@ -49,22 +51,29 @@ build_compose_stack() {
   # In Mowgli mode, select one direct GNSS stack.
   # In MAVROS mode, GPS is handled via Pixhawk/MAVROS + NTRIP sidecar,
   # so direct GNSS compose fragments must not be included.
-  if [[ "${HARDWARE_BACKEND:-mowgli}" != "mavros" ]]; then
-    case "${GNSS_BACKEND:-gps}" in
+  gnss_backend="$(effective_gnss_backend 2>/dev/null || true)"
+  if ! is_supported_gnss_backend "$gnss_backend"; then
+    error "Unknown GNSS_BACKEND: ${GNSS_BACKEND:-unset} (expected: $(list_supported_gnss_backends))"
+    return 1
+  fi
+
+  if [ "$gnss_backend" != "disabled" ]; then
+    gnss_service="$(compose_gnss_service_name "$gnss_backend" 2>/dev/null || true)"
+    case "$gnss_service" in
       gps)
         COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.gps.yml")
         ;;
-      ublox)
+      gnss_ublox)
         COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.ublox.yaml")
         ;;
-      unicore)
+      gnss_unicore)
         COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.unicore.yaml")
         ;;
-      nmea)
+      gnss_nmea)
         COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.nmea.yaml")
         ;;
       *)
-        error "Unknown GNSS_BACKEND: ${GNSS_BACKEND:-unset} (expected: gps, ublox, unicore, nmea)"
+        error "No compose fragment mapped for GNSS backend: ${gnss_backend}"
         return 1
         ;;
     esac

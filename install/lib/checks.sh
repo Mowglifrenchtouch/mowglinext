@@ -107,19 +107,21 @@ check_containers() {
   : "${GNSS_BACKEND:=gps}"
 
   local services=(mowgli gui mosquitto)
+  local gnss_backend
+  local gnss_service
+
+  gnss_backend="$(effective_gnss_backend 2>/dev/null || true)"
 
   if [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]; then
     services+=(mavros ntrip)
   else
-    case "${GNSS_BACKEND}" in
-      gps)     services+=(gps) ;;
-      ublox)   services+=(gnss_ublox) ;;
-      unicore) services+=(gnss_unicore) ;;
-      *)
-        fail "Unknown GNSS_BACKEND=${GNSS_BACKEND}"
-        add_issue "Unknown GNSS_BACKEND=${GNSS_BACKEND}. Re-run installer."
-        ;;
-    esac
+    if ! is_supported_gnss_backend "$gnss_backend"; then
+      fail "Unknown GNSS_BACKEND=${GNSS_BACKEND}"
+      add_issue "Unknown GNSS_BACKEND=${GNSS_BACKEND}. Re-run installer."
+    else
+      gnss_service="$(compose_gnss_service_name "$gnss_backend" 2>/dev/null || true)"
+      [ -n "$gnss_service" ] && services+=("$gnss_service")
+    fi
   fi
 
   if [[ "${LIDAR_ENABLED}" == "true" && "${LIDAR_TYPE}" != "none" ]]; then
@@ -141,6 +143,7 @@ check_containers() {
       gps)          container="mowgli-gps" ;;
       gnss_ublox)   container="mowgli-gps" ;;
       gnss_unicore) container="mowgli-gps" ;;
+      gnss_nmea)    container="mowgli-gps" ;;
       lidar)        container="mowgli-lidar" ;;
       gui)          container="mowgli-gui" ;;
       mosquitto)    container="mowgli-mqtt" ;;
@@ -190,6 +193,11 @@ check_containers() {
 check_firmware() {
   step "Check: Mowgli firmware"
 
+  if [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]; then
+    info "MAVROS backend: skipping direct Mowgli firmware check"
+    return
+  fi
+
   if ! docker_cmd inspect -f '{{.State.Status}}' mowgli-ros2 2>/dev/null | grep -q running; then
     warn "mowgli-ros2 not running — skipping firmware check"
     return
@@ -229,6 +237,10 @@ check_gps() {
   step "Check: GPS"
 
   : "${GNSS_BACKEND:=gps}"
+  local gnss_backend
+  local gps_container
+
+  gnss_backend="$(effective_gnss_backend 2>/dev/null || true)"
 
   if [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]; then
     info "MAVROS backend: GPS is handled through Pixhawk/MAVROS"
@@ -292,15 +304,17 @@ check_gps() {
     return
   fi
 
-  local gps_container="mowgli-gps"
-  case "${GNSS_BACKEND}" in
-    gps|ublox|unicore) ;;
-    *)
-      fail "Unknown GNSS_BACKEND=${GNSS_BACKEND}"
-      add_issue "Unknown GNSS_BACKEND=${GNSS_BACKEND}. Re-run installer."
-      return
-      ;;
-  esac
+  if ! is_supported_gnss_backend "$gnss_backend"; then
+    fail "Unknown GNSS_BACKEND=${GNSS_BACKEND}"
+    add_issue "Unknown GNSS_BACKEND=${GNSS_BACKEND}. Re-run installer."
+    return
+  fi
+
+  gps_container="$(compose_gnss_container_name "$gnss_backend" 2>/dev/null || true)"
+  if [ -z "$gps_container" ]; then
+    info "Direct GNSS container disabled"
+    return
+  fi
 
   if ! docker_cmd inspect -f '{{.State.Status}}' "$gps_container" 2>/dev/null | grep -q running; then
     warn "$gps_container not running — skipping GPS check"
@@ -344,31 +358,35 @@ check_gps() {
     fail "GPS: No fix (status=$status_val)"
   fi
 
-  if [[ "${GNSS_BACKEND}" != "gps" ]]; then
-    info "GNSS backend ${GNSS_BACKEND}: direct /gps/fix check passed"
+  if [[ "$gnss_backend" != "gps" ]]; then
+    info "GNSS backend ${gnss_backend}: direct /gps/fix check passed"
   fi
 
-  local ntrip_logs
-  ntrip_logs="$(docker_cmd logs "$gps_container" --tail 80 2>&1 || true)"
+  if [[ "$gnss_backend" == "nmea" ]]; then
+    info "GNSS backend nmea: skipping bundled NTRIP check"
+  else
+    local ntrip_logs
+    ntrip_logs="$(docker_cmd logs "$gps_container" --tail 80 2>&1 || true)"
 
-  if echo "$ntrip_logs" | grep -q "Connected to http"; then
-    local ntrip_url
-    ntrip_url="$(echo "$ntrip_logs" | grep -oP "Connected to \K[^ ]+" | tail -1)"
-    info "NTRIP connected: $ntrip_url"
-  elif echo "$ntrip_logs" | grep -q "Unable to connect"; then
-    fail "NTRIP connection failed"
-    add_issue "NTRIP cannot connect. Check ntrip_host and ntrip_mountpoint in docker/config/mowgli/mowgli_robot.yaml"
-  elif echo "$ntrip_logs" | grep -q "Network is unreachable"; then
-    fail "NTRIP: network unreachable"
-    add_issue "No internet connection for NTRIP. Check your network configuration."
-  fi
+    if echo "$ntrip_logs" | grep -q "Connected to http"; then
+      local ntrip_url
+      ntrip_url="$(echo "$ntrip_logs" | grep -oP "Connected to \K[^ ]+" | tail -1)"
+      info "NTRIP connected: $ntrip_url"
+    elif echo "$ntrip_logs" | grep -q "Unable to connect"; then
+      fail "NTRIP connection failed"
+      add_issue "NTRIP cannot connect. Check ntrip_host and ntrip_mountpoint in docker/config/mowgli/mowgli_robot.yaml"
+    elif echo "$ntrip_logs" | grep -q "Network is unreachable"; then
+      fail "NTRIP: network unreachable"
+      add_issue "No internet connection for NTRIP. Check your network configuration."
+    fi
 
-  if echo "$ntrip_logs" | grep -q "Forwarded.*RTCM messages"; then
-    local rtcm_count
-    rtcm_count="$(echo "$ntrip_logs" | grep -oP "Forwarded \K\d+" | tail -1)"
-    info "RTCM bridge: $rtcm_count corrections forwarded to GPS"
-  elif echo "$ntrip_logs" | grep -q "NTRIP enabled: true"; then
-    warn "RTCM bridge not forwarding yet — RTK may take a few minutes to converge"
+    if echo "$ntrip_logs" | grep -q "Forwarded.*RTCM messages"; then
+      local rtcm_count
+      rtcm_count="$(echo "$ntrip_logs" | grep -oP "Forwarded \K\d+" | tail -1)"
+      info "RTCM bridge: $rtcm_count corrections forwarded to GPS"
+    elif echo "$ntrip_logs" | grep -q "NTRIP enabled: true"; then
+      warn "RTCM bridge not forwarding yet — RTK may take a few minutes to converge"
+    fi
   fi
 
   local datum_lat datum_lon
@@ -385,7 +403,9 @@ check_gps() {
         sed -i "s/datum_lat:.*/datum_lat: $lat/" "$yaml_file"
         sed -i "s/datum_lon:.*/datum_lon: $lon/" "$yaml_file"
         info "Datum set to $lat, $lon in $yaml_file"
-        info "Restart mowgli to apply: docker compose -f $FINAL_COMPOSE_FILE --env-file $FINAL_ENV_FILE restart gps mowgli"
+        local gnss_service
+        gnss_service="$(compose_gnss_service_name "$gnss_backend" 2>/dev/null || true)"
+        info "Restart mowgli to apply: docker compose -f $FINAL_COMPOSE_FILE --env-file $FINAL_ENV_FILE restart ${gnss_service:-gps} mowgli"
       else
         add_issue "Set datum_lat and datum_lon in docker/config/mowgli/mowgli_robot.yaml to your docking station coordinates"
       fi
