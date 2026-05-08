@@ -101,17 +101,20 @@ build_compose_stack() {
     esac
   fi
 
-  [[ "${TFLUNA_FRONT_ENABLED:-false}" == "true" ]] && \
+  if effective_tfluna_front_enabled; then
     COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.tfluna-front.yml")
+  fi
 
-  [[ "${TFLUNA_EDGE_ENABLED:-false}" == "true" ]] && \
+  if effective_tfluna_edge_enabled; then
     COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.tfluna-edge.yml")
+  fi
 
   [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]] && \
     COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.mavros.yml")
 
-  [[ "${ENABLE_VESC:-false}" == "true" ]] && \
+  if effective_vesc_enabled; then
     COMPOSE_FILES+=("$COMPOSE_SRC_DIR/docker-compose.vesc.yml")
+  fi
 
   info "Selected compose fragments:"
   for f in "${COMPOSE_FILES[@]}"; do

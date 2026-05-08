@@ -128,12 +128,16 @@ check_containers() {
     services+=(lidar)
   fi
 
-  if [[ "${TFLUNA_FRONT_ENABLED:-false}" == "true" ]]; then
+  if effective_tfluna_front_enabled; then
     services+=(tfluna_front)
   fi
 
-  if [[ "${TFLUNA_EDGE_ENABLED:-false}" == "true" ]]; then
+  if effective_tfluna_edge_enabled; then
     services+=(tfluna_edge)
+  fi
+
+  if effective_vesc_enabled; then
+    services+=(vesc)
   fi
 
   for svc in "${services[@]}"; do
@@ -149,6 +153,7 @@ check_containers() {
       mosquitto)    container="mowgli-mqtt" ;;
       mavros)       container="mowgli-mavros" ;;
       ntrip)        container="mowgli-ntrip" ;;
+      vesc)         container="mowgli-vesc" ;;
       tfluna_front) container="mowgli-tfluna-front" ;;
       tfluna_edge)  container="mowgli-tfluna-edge" ;;
     esac
@@ -463,6 +468,15 @@ check_lidar() {
 
 check_rangefinders() {
   step "Check: Rangefinders"
+
+  if [[ "${TFLUNA_FRONT_ENABLED:-false}" == "true" || "${TFLUNA_EDGE_ENABLED:-false}" == "true" ]]; then
+    if ! feature_is_available tfluna; then
+      warn_unavailable_feature_once \
+        tfluna \
+        "TF-Luna rangefinder services are not available on this branch yet; skipping TF-Luna device checks."
+      return
+    fi
+  fi
 
   if [[ "${TFLUNA_FRONT_ENABLED:-false}" == "true" ]]; then
     if [ -e "${TFLUNA_FRONT_PORT:-/dev/tfluna_front}" ]; then

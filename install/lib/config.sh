@@ -28,6 +28,105 @@ GUI_IMAGE_DEFAULT="ghcr.io/cedbossneo/mowglinext/mowglinext-gui:${IMAGE_TAG}"
 CHECK_ONLY=false
 CLI_PRESET=false
 
+range_services_available() {
+  local fragment
+
+  for fragment in \
+    "$COMPOSE_SRC_DIR/docker-compose.tfluna-front.yml" \
+    "$COMPOSE_SRC_DIR/docker-compose.tfluna-edge.yml"
+  do
+    if [ ! -f "$fragment" ]; then
+      return 1
+    fi
+
+    if grep -q 'ghcr.io/\.\.\.' "$fragment" 2>/dev/null; then
+      return 1
+    fi
+  done
+
+  return 0
+}
+
+vesc_service_available() {
+  # Keep VESC disabled during the installer hardening phase until the
+  # runtime/image contract is finalized and tested end-to-end.
+  return 1
+}
+
+feature_is_available() {
+  local feature="${1:-}"
+
+  case "$feature" in
+    range|rangefinders|tfluna|tfluna_front|tfluna_edge)
+      range_services_available
+      ;;
+    vesc)
+      vesc_service_available
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+warn_unavailable_feature_once() {
+  local feature="${1:?warn_unavailable_feature_once: missing feature}"
+  local message="${2:?warn_unavailable_feature_once: missing message}"
+  local flag_name="FEATURE_WARNING_${feature//[^A-Za-z0-9_]/_}"
+
+  if [ "${!flag_name:-false}" = "true" ]; then
+    return 0
+  fi
+
+  warn "$message"
+  printf -v "$flag_name" '%s' "true"
+}
+
+effective_tfluna_front_enabled() {
+  if [[ "${TFLUNA_FRONT_ENABLED:-false}" != "true" ]]; then
+    return 1
+  fi
+
+  if feature_is_available tfluna_front; then
+    return 0
+  fi
+
+  warn_unavailable_feature_once \
+    tfluna \
+    "TF-Luna rangefinder services are not available on this branch yet; requested TF-Luna options will be skipped."
+  return 1
+}
+
+effective_tfluna_edge_enabled() {
+  if [[ "${TFLUNA_EDGE_ENABLED:-false}" != "true" ]]; then
+    return 1
+  fi
+
+  if feature_is_available tfluna_edge; then
+    return 0
+  fi
+
+  warn_unavailable_feature_once \
+    tfluna \
+    "TF-Luna rangefinder services are not available on this branch yet; requested TF-Luna options will be skipped."
+  return 1
+}
+
+effective_vesc_enabled() {
+  if [[ "${ENABLE_VESC:-false}" != "true" ]]; then
+    return 1
+  fi
+
+  if feature_is_available vesc; then
+    return 0
+  fi
+
+  warn_unavailable_feature_once \
+    vesc \
+    "VESC support is not available on this branch yet; the VESC compose fragment will be skipped."
+  return 1
+}
+
 list_supported_gnss_backends() {
   local backends="gps ublox unicore nmea"
   if [[ "${HARDWARE_BACKEND:-mowgli}" == "mavros" ]]; then

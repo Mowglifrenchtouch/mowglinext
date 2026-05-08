@@ -148,12 +148,12 @@ build_dynamic_udev_rules() {
   fi
 
   # TF-Luna front
-  if [ "${TFLUNA_FRONT_ENABLED:-false}" = "true" ] && [ -n "${TFLUNA_FRONT_UART_DEVICE:-}" ]; then
+  if effective_tfluna_front_enabled && [ -n "${TFLUNA_FRONT_UART_DEVICE:-}" ]; then
     echo "KERNEL==\"$(basename "$TFLUNA_FRONT_UART_DEVICE")\", SYMLINK+=\"tfluna_front\", MODE=\"0666\""
   fi
 
   # TF-Luna edge
-  if [ "${TFLUNA_EDGE_ENABLED:-false}" = "true" ] && [ -n "${TFLUNA_EDGE_UART_DEVICE:-}" ]; then
+  if effective_tfluna_edge_enabled && [ -n "${TFLUNA_EDGE_UART_DEVICE:-}" ]; then
     echo "KERNEL==\"$(basename "$TFLUNA_EDGE_UART_DEVICE")\", SYMLINK+=\"tfluna_edge\", MODE=\"0666\""
   fi
 }
