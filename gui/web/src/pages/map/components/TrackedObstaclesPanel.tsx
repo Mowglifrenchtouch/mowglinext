@@ -1,5 +1,5 @@
 import {StopOutlined, CheckCircleOutlined} from "@ant-design/icons";
-import {App, Button, Modal} from "antd";
+import {App, Button} from "antd";
 import {useThemeMode} from "../../../theme/ThemeContext.tsx";
 import type {TrackedObstacle} from "../../../types/ros.ts";
 import {useApi} from "../../../hooks/useApi.ts";

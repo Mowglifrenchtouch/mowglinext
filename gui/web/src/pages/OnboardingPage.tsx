@@ -216,7 +216,9 @@ const RobotModelStep: React.FC<RobotModelStepProps> = ({ values, onChange }) => 
 
 // ── GPS Configuration step (receiver + NTRIP, no datum) ─────────────────
 
-const GpsStep: React.FC<RobotModelStepProps> = ({ values, onChange }) => {
+type GpsStepProps = RobotModelStepProps & { gpsRestarting?: boolean };
+
+const GpsStep: React.FC<GpsStepProps> = ({ values, onChange, gpsRestarting }) => {
     const ntripEnabled = values.ntrip_enabled ?? true;
 
     return (
