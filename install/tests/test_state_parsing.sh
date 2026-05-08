@@ -35,21 +35,23 @@ section "valid preset parsing"
 
 cat > "$SANDBOX_REPO/install/.preset" <<'EOF'
 # Composer preset
+HARDWARE_BACKEND=mavros
 GPS_CONNECTION=usb
 GPS_PROTOCOL="UBX"
 GPS_BAUD=460800
 LIDAR_MODEL=
 EOF
 
-unset GPS_CONNECTION GPS_PROTOCOL GPS_BAUD LIDAR_MODEL 2>/dev/null || true
+unset HARDWARE_BACKEND GPS_CONNECTION GPS_PROTOCOL GPS_BAUD LIDAR_MODEL 2>/dev/null || true
 STATE_ACTIVE_PRESET_FILE=""
 STATE_ACTIVE_PRESET_COUNT=0
 load_preset_file "$SANDBOX_REPO/install/.preset"
+assert_eq "preset loads HARDWARE_BACKEND" "mavros" "${HARDWARE_BACKEND:-}"
 assert_eq "preset loads GPS_CONNECTION" "usb" "${GPS_CONNECTION:-}"
 assert_eq "preset strips matching quotes" "UBX" "${GPS_PROTOCOL:-}"
 assert_eq "preset keeps numeric text" "460800" "${GPS_BAUD:-}"
 assert_eq "preset preserves empty values" "" "${LIDAR_MODEL-__unset__}"
-assert_eq "preset count tracks loaded keys" "4" "${STATE_ACTIVE_PRESET_COUNT:-0}"
+assert_eq "preset count tracks loaded keys" "5" "${STATE_ACTIVE_PRESET_COUNT:-0}"
 
 section "invalid preset lines are ignored"
 

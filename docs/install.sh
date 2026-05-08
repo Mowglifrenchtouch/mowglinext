@@ -89,6 +89,7 @@ GNSS_FLAG=""
 GPS_FLAG=""
 LIDAR_FLAG=""
 TFLUNA_FLAG=""
+BACKEND_FLAG=""
 
 REPO_URL="https://github.com/cedbossneo/mowglinext.git"
 REPO_BRANCH="main"
@@ -97,6 +98,7 @@ INSTALL_DIR="${MOWGLI_HOME:-$HOME/mowglinext}"
 # ── Parse flags ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --backend=*) BACKEND_FLAG="${1#--backend=}"; shift ;;
     --gnss=*)    GNSS_FLAG="${1#--gnss=}"; shift ;;
     --gps=*)     GPS_FLAG="${1#--gps=}"; shift ;;
     --lidar=*)   LIDAR_FLAG="${1#--lidar=}"; shift ;;
@@ -106,6 +108,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: curl -sSL https://mowgli.garden/install.sh | bash -s -- [OPTIONS]"
       echo ""
       echo "Options:"
+      echo "  --backend=TYPE      Hardware backend: mowgli (default), mavros (advanced Pixhawk path)"
       echo "  --gnss=BACKEND     GNSS driver: gps (legacy UBX/NMEA), ublox (F9P), unicore (UM98x)"
       echo "  --gps=PRESET       GPS protocol+wiring: ubx-usb, ubx-uart, nmea-usb, nmea-uart"
       echo "                     (ignored by --gnss=unicore — driver picks its own protocol)"
@@ -169,7 +172,7 @@ fi
 PRESET_FILE="$INSTALL_DIR/install/.preset"
 HAS_PRESET=false
 
-if [[ -n "$GNSS_FLAG" || -n "$GPS_FLAG" || -n "$LIDAR_FLAG" || -n "$TFLUNA_FLAG" ]]; then
+if [[ -n "$BACKEND_FLAG" || -n "$GNSS_FLAG" || -n "$GPS_FLAG" || -n "$LIDAR_FLAG" || -n "$TFLUNA_FLAG" ]]; then
   HAS_PRESET=true
   step "Writing hardware preset from composer"
 
@@ -178,6 +181,19 @@ if [[ -n "$GNSS_FLAG" || -n "$GPS_FLAG" || -n "$LIDAR_FLAG" || -n "$TFLUNA_FLAG"
 # These values pre-fill the interactive installer prompts.
 # The installer will skip questions for pre-configured sections.
 PRESET
+
+  # ── Hardware backend preset ────────────────────────────────────────────
+  if [[ -n "$BACKEND_FLAG" ]]; then
+    case "$BACKEND_FLAG" in
+      mowgli|mavros)
+        echo "HARDWARE_BACKEND=${BACKEND_FLAG}" >> "$PRESET_FILE"
+        info "Hardware backend: $BACKEND_FLAG"
+        ;;
+      *)
+        warn "Unknown hardware backend: $BACKEND_FLAG (expected mowgli|mavros) — will ask interactively"
+        ;;
+    esac
+  fi
 
   # ── GNSS backend preset ────────────────────────────────────────────────
   if [[ -n "$GNSS_FLAG" ]]; then
