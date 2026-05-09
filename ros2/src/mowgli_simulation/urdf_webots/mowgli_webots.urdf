@@ -2,27 +2,133 @@
 <!--
   Webots-side URDF for the Mowgli mower.
 
-  This URDF is consumed only by webots_ros2_driver to wire the Webots
-  device names (defined in worlds_webots/mowgli_garden.wbt) to ROS2
-  topics + frame_ids. The robot's static TF tree (base_link →
-  imu_link / lidar_link / gps_link) is published by the regular
-  robot_state_publisher fed from mowgli_bringup/urdf/mowgli.urdf.xacro
-  — the same xacro used on real hardware. Two URDFs, one for sim
-  device wiring, one for the actual robot description.
+  This URDF mirrors the kinematic structure of the inline Robot {} node
+  in worlds_webots/mowgli_garden.wbt:
+    * chassis (base_link) at z = 0.10
+    * two rear drive wheels at ±0.1625 m on Y, axis along Y, radius 0.093
+    * two front passive casters (kept simple here as fixed mounts; they
+      are real BallJoints in the .wbt, so the wheel TFs published by RSP
+      from this URDF will be slightly off in pitch — irrelevant to the
+      navigation stack which ignores caster TFs).
+    * sensor frames (lidar, imu, gps) matching the Webots device
+      placements
 
-  base_link == base_footprint in our use case (flat outdoor mower with
-  no significant tilt). diff_drive_controller publishes its odometry
-  with child_frame_id: base_footprint to satisfy REP-105 / Nav2.
+  It is consumed by:
+    * hardware_interface — needs <joint name="…"/> elements for every
+      ros2_control joint to extract joint limits (kilted+ requirement).
+    * robot_state_publisher — publishes the static TF tree from the
+      <joint> elements + the joint_state_broadcaster's wheel positions.
+    * webots_ros2_driver / webots_ros2_control — wires Webots devices
+      (declared in the <webots> block below) to ROS2, and binds
+      Webots motors to ros2_control joints by name.
+
+  base_link == base_footprint here (flat outdoor mower, no significant
+  tilt). diff_drive_controller publishes odometry with
+  child_frame_id="base_footprint", which we satisfy by the explicit
+  fixed joint base_link → base_footprint below.
 -->
 <robot name="MowgliMower">
-  <!--
-    Minimal kinematic link block. The static TF tree (base_link →
-    sensor links) is published by mowgli_bringup's robot_state_publisher
-    using the production URDF. RSP just needs *a* link to validate this
-    file as a URDF.
-  -->
-  <link name="base_link"/>
 
+  <!-- ── Kinematic structure ───────────────────────────────────────── -->
+  <!--
+    Inertials are intentionally omitted on the chassis: the actual
+    physics is owned by the inline Robot {} in mowgli_garden.wbt
+    (Webots' physics engine), and KDL warns when the URDF root link
+    carries an <inertial> block. URDF visual/collision are kept so
+    that downstream tools (RViz, Foxglove, MoveIt) render correctly.
+  -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.60 0.40 0.19"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.60 0.40 0.19"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Flat outdoor mower: collapse base_link and base_footprint. -->
+  <link name="base_footprint"/>
+  <joint name="base_link_to_base_footprint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_footprint"/>
+    <origin xyz="0 0 -0.10" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Left rear drive wheel (physics in .wbt — see comment on base_link). -->
+  <link name="left_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.093"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.093"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_wheel_motor" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel"/>
+    <origin xyz="0 0.1625 -0.10" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="10.0" velocity="100.0"/>
+  </joint>
+
+  <!-- Right rear drive wheel (physics in .wbt — see comment on base_link). -->
+  <link name="right_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.093"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder length="0.04" radius="0.093"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_wheel_motor" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel"/>
+    <origin xyz="0 -0.1625 -0.10" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="10.0" velocity="100.0"/>
+  </joint>
+
+  <!-- Sensor frames (static — RSP publishes these directly). -->
+  <link name="lidar_link"/>
+  <joint name="base_link_to_lidar" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0 0.024 0.12" rpy="0 0 3.1408"/>
+  </joint>
+
+  <link name="imu_link"/>
+  <joint name="base_link_to_imu" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gps_link"/>
+  <joint name="base_link_to_gps" type="fixed">
+    <parent link="base_link"/>
+    <child link="gps_link"/>
+    <origin xyz="0.30 0 0.10" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ── Webots device + plugin wiring ─────────────────────────────── -->
   <webots>
     <device reference="lidar" type="Lidar">
       <ros>
@@ -58,6 +164,7 @@
     <plugin type="webots_ros2_control::Ros2Control" />
   </webots>
 
+  <!-- ── ros2_control joint declarations ───────────────────────────── -->
   <ros2_control name="WebotsControl" type="system">
     <hardware>
       <plugin>webots_ros2_control::Ros2ControlSystem</plugin>

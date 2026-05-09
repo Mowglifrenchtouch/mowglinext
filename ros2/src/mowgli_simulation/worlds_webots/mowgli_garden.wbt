@@ -9,7 +9,9 @@
 #   network fetches at boot.
 
 WorldInfo {
-  basicTimeStep 16
+  # 20 ms physics step matches the controller_manager update_rate (50 Hz)
+  # in config_webots/ros2_control.yaml — Webots warns otherwise.
+  basicTimeStep 20
   coordinateSystem "ENU"
   gpsCoordinateSystem "WGS84"
   gpsReference 48.137154 11.576124 0

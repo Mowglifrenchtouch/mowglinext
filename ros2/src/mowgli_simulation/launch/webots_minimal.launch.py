@@ -91,12 +91,12 @@ def generate_launch_description():
             {
                 "robot_description": robot_description_path,
                 "use_sim_time": use_sim_time,
-                # Phase 1 slice: let the Webots driver publish robot_description
-                # so controller_manager can find the joint names. In the full
-                # sim launch, mowgli_bringup's robot_state_publisher takes over
-                # with the production URDF + static TF tree (set this back to
-                # False there).
-                "set_robot_state_publisher": True,
+                # We run our own robot_state_publisher above with the same
+                # URDF content, so disable the driver-internal republish to
+                # avoid a duplicate publisher on /robot_description (which
+                # confuses controller_manager's transient_local subscriber
+                # — it can latch the wrong content).
+                "set_robot_state_publisher": False,
             },
             ros2_control_params,
         ],
@@ -107,11 +107,18 @@ def generate_launch_description():
             ("/diffdrive_controller/cmd_vel", "/cmd_vel"),
             ("/diffdrive_controller/odom", "/wheel_odom_raw"),
         ],
-        respawn=True,
+        # Phase 1: do not respawn the driver. A respawn loop hides the real
+        # error (the spawners are already running and will fail with
+        # "executed more than once" on the second start, masking whatever
+        # caused the original crash). Fail loud, fix the root cause.
+        respawn=False,
     )
 
     # ── ros2_control spawners ────────────────────────────────────────────────
-    controller_manager_timeout = ["--controller-manager-timeout", "50"]
+    # 90 s timeout: gives the Webots IPC connection + URDF parse + hardware
+    # interface registration plenty of slack on first boot, especially
+    # under Xvfb where startup is slower than on a real display.
+    controller_manager_timeout = ["--controller-manager-timeout", "90"]
 
     diffdrive_spawner = Node(
         package="controller_manager",
