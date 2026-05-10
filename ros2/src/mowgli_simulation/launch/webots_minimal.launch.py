@@ -107,11 +107,18 @@ def generate_launch_description():
             ("/diffdrive_controller/cmd_vel", "/cmd_vel"),
             ("/diffdrive_controller/odom", "/wheel_odom_raw"),
         ],
-        # Phase 1: do not respawn the driver. A respawn loop hides the real
-        # error (the spawners are already running and will fail with
-        # "executed more than once" on the second start, masking whatever
-        # caused the original crash). Fail loud, fix the root cause.
-        respawn=False,
+        # respawn=True: webots-controller has a hardcoded 30 s connect
+        # timeout to the simulator. On boot, Webots takes 20-40 s to
+        # finish loading the world (textures, ODE setup, etc.) and the
+        # `<extern>` controller slot only opens at the end. If the 30 s
+        # timeout fires before Webots is ready, the controller "Gives
+        # up" and dies — taking the entire stack down because
+        # WaitForControllerConnection then never starts the ros2_control
+        # spawners. Allowing respawn re-attempts the connect; by the
+        # second attempt Webots is ready and the connection succeeds.
+        # (Phase 1 dev disabled this to surface other crashes; with the
+        # Phase 2.2 fixes in place, the race is the only crash mode.)
+        respawn=True,
     )
 
     # ── ros2_control spawners ────────────────────────────────────────────────
