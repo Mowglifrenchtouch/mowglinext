@@ -35,7 +35,10 @@ services:
     ipc: host
     environment:
       <<: *ros2-env
+      DISPLAY: ":99"
       WEBOTS_MODE: realtime
+      VNC_PORT: 5900
+      NOVNC_PORT: 6080
     command: /ros2_ws/scripts/start_webots_minimal.sh
     volumes:
       - ./config/cyclonedds.xml:/cyclonedds.xml:ro

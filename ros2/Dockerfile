@@ -296,6 +296,7 @@ RUN set -eux; \
     # Headless rendering and lightweight GUI helpers for simulation containers.
     apt-get install -y --no-install-recommends \
       xvfb \
+      x11vnc \
       tigervnc-standalone-server \
       tigervnc-common \
       novnc \
