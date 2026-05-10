@@ -21,11 +21,39 @@ x-ros2-env: &ros2-env
 services:
 
   # -------------------------------------------------------------------------
+  # Minimal Webots backend only — simulator + ros2_control + raw sensor topics
+  # No Nav2, BT, map server, or fake hardware bridge.
+  # -------------------------------------------------------------------------
+  webots-minimal:
+    container_name: mowgli_webots_minimal
+    image: mowgli-simulation:latest
+    build:
+      context: ../ros2
+      dockerfile: Dockerfile
+      target: simulation
+    network_mode: host
+    ipc: host
+    environment:
+      <<: *ros2-env
+      WEBOTS_MODE: realtime
+    command: /ros2_ws/scripts/start_webots_minimal.sh
+    volumes:
+      - ./config/cyclonedds.xml:/cyclonedds.xml:ro
+      - mowgli_sim_maps:/ros2_ws/maps
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-file: "3"
+        max-size: 10m
+
+  # -------------------------------------------------------------------------
   # Headless simulation — Gazebo + full Nav2 + BT + coverage + Foxglove
   # No GUI, lowest resource usage. Good for CI and automated E2E tests.
   # -------------------------------------------------------------------------
   simulation:
     container_name: mowgli_simulation
+    image: mowgli-simulation:latest
     build:
       context: ../ros2
       dockerfile: Dockerfile

@@ -287,24 +287,57 @@ CMD ["ros2", "launch", "mowgli_bringup", "mowgli.launch.py"]
 FROM runtime AS simulation
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG TARGETARCH
+ARG WEBOTS_VERSION=R2025a
+ARG WEBOTS_DEB=webots_2025a_amd64.deb
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Headless rendering (sensors need a virtual display when no GPU)
-    xvfb \
-    # VNC + lightweight desktop for sim GUI access from macOS
-    tigervnc-standalone-server \
-    tigervnc-common \
-    novnc \
-    websockify \
-    openbox \
-    xterm \
-    x11-utils \
-    # TODO(webots): install Webots binary + ros-kilted-webots-ros2-driver
- && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    # Headless rendering and lightweight GUI helpers for simulation containers.
+    apt-get install -y --no-install-recommends \
+      xvfb \
+      tigervnc-standalone-server \
+      tigervnc-common \
+      novnc \
+      websockify \
+      openbox \
+      xterm \
+      x11-utils \
+      ca-certificates \
+      curl; \
+    if [ "${TARGETARCH:-amd64}" != "amd64" ]; then \
+      echo "Webots official Linux packages are only published for amd64; TARGETARCH=${TARGETARCH:-unknown} is unsupported." >&2; \
+      exit 1; \
+    fi; \
+    # Kilted docs officially install ros-kilted-webots-ros2. When the
+    # driver/control split packages are available in the apt index we prefer
+    # them explicitly, otherwise we fall back to the documented metapackage.
+    if apt-cache show ros-kilted-webots-ros2-driver >/dev/null 2>&1 && \
+       apt-cache show ros-kilted-webots-ros2-control >/dev/null 2>&1; then \
+      apt-get install -y --no-install-recommends \
+        ros-kilted-webots-ros2-driver \
+        ros-kilted-webots-ros2-control; \
+    else \
+      apt-get install -y --no-install-recommends ros-kilted-webots-ros2; \
+    fi; \
+    curl -fL \
+      "https://github.com/cyberbotics/webots/releases/download/${WEBOTS_VERSION}/${WEBOTS_DEB}" \
+      -o "/tmp/${WEBOTS_DEB}"; \
+    apt-get install -y --no-install-recommends "/tmp/${WEBOTS_DEB}"; \
+    rm -f "/tmp/${WEBOTS_DEB}"; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV WEBOTS_HOME=/usr/local/webots
+ENV ROS2_WEBOTS_HOME=/usr/local/webots
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV USER=root
+ENV USERNAME=root
 
 # Copy VNC startup script
 COPY scripts/start_vnc.sh /ros2_ws/scripts/start_vnc.sh
-RUN chmod +x /ros2_ws/scripts/start_vnc.sh
+COPY scripts/start_webots_minimal.sh /ros2_ws/scripts/start_webots_minimal.sh
+COPY scripts/ros2_cli_wrapper.sh /usr/local/bin/ros2
+RUN chmod +x /ros2_ws/scripts/start_vnc.sh /ros2_ws/scripts/start_webots_minimal.sh /usr/local/bin/ros2
 
 
 # Copy Foxglove layout for easy import
