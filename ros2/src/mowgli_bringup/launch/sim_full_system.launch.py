@@ -97,18 +97,17 @@ def generate_launch_description() -> LaunchDescription:
         description="Enable LiDAR-dependent nodes (obstacle tracker, fusion_graph scan-matching). Set to false for GPS-only.",
     )
 
-    # Webots execution mode. ``fast`` is the default — Webots steps as
-    # fast as the host can, which is essential for E2E test runtime
-    # (RecordArea, MOWING, etc. progressing in reasonable wall time).
-    # The kinematic_drive plugin's wall-clock cmd_vel timeout (see
-    # mowgli_simulation/kinematic_drive.py) keeps the body driven by
-    # the latest cmd_vel even between sparse 10-Hz wall publishes from
-    # twist_mux / behavior_server, so Nav2 BackUp / FollowPath finish
-    # cleanly under fast mode. Override with ``mode:=realtime`` to
-    # match wall-clock pacing for visual debugging.
+    # Webots execution mode. ``realtime`` is the default — sim time
+    # advances at wall-clock rate (1×). Required because controller_server
+    # at 20 Hz sim time gets CPU-starved under fast mode (sim runs ~5×
+    # wall on this hardware → controller dt clamps to 0.5 s → PRE_ROTATE
+    # PID can't close large heading errors before goal_timeout). The
+    # kinematic_drive plugin handles pacing fine in either mode; the
+    # bottleneck is the Nav2 controller loop. Override with ``mode:=fast``
+    # for E2E test runtime when the timing budget allows.
     mode_arg = DeclareLaunchArgument(
         "mode",
-        default_value="fast",
+        default_value="realtime",
         description="Webots execution mode: realtime | fast | pause.",
     )
 
