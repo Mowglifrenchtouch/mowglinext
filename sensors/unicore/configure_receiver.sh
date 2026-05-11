@@ -286,10 +286,18 @@ apply_receiver_configuration() {
     # 180 s tolerates short NTRIP outages without dropping back to single
     # point. Default is 60 s on most firmware revisions.
     "CONFIG RTK TIMEOUT 180"
-    "CONFIG RTK RELIABILITY 4 3"
-    "CONFIG DGPS TIMEOUT 300"
+    "CONFIG RTK RELIABILITY 3 1"
+    "CONFIG DGPS TIMEOUT 600"
+    "CONFIG UNDULATION AUTO"
     "${signalgroup}"
-    "CONFIG AGNSS ENABLE"
+    "CONFIG SBAS DISABLE"
+    "CONFIG AGNSS DISABLE"
+    "CONFIG PVTALG MULTI"
+    "CONFIG MMP ENABLE"
+    "CONFIG PSRVELDRPOS ENABLE"
+    "CONFIG PPP DATUM WGS84"
+    "CONFIG ANTIJAM AUTO"
+    "CONFIG PPS DISABLE"
 
     # Constellation enables. Mowgli mowers are typically in mid-latitude
     # open sky, so we want everything except QZSS (regional, doesn't help
@@ -299,6 +307,8 @@ apply_receiver_configuration() {
     "UNMASK GAL"
     "UNMASK BDS"
     "MASK QZSS"
+    "MASK IRNSS"
+
 
     # Output messages — port-agnostic LOG form, rate is period in seconds.
     # Unicore log-name convention: base name + 'A' suffix = ASCII format.
@@ -306,7 +316,11 @@ apply_receiver_configuration() {
     # SINGLE trailing A — and our parser keys on that string).
     # BESTNAV + A = BESTNAVA (message header `#BESTNAVA,...` — double A
     # because the base name itself ends in V, not A).
-    "LOG GPGGA ONTIME 1"
+    "LOG GPGGA ONTIME 0.1"
+    "LOG GPGST ONTIME 0.1"
+    "LOG GPRMC ONTIME 0.1"
+    "LOG GPGSA ONTIME 1"
+    "LOG RTKSTATUSA ONTIME 1"
     "LOG PVTSLNA ONTIME 0.1"
     "LOG BESTNAVA ONTIME 0.1"
     "LOG GNHPR ONTIME 0.1"
