@@ -25,7 +25,11 @@
 # =============================================================================
 set -euo pipefail
 
-CONFIG="/config/mowgli_robot.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/configure_receiver.sh"
+
+CONFIG="${MOWGLI_CONFIG_PATH:-/config/mowgli_robot.yaml}"
 GPS_PID=""
 NTRIP_PID=""
 
@@ -70,6 +74,7 @@ GPS_PORT="${GPS_PORT:-/dev/gps}"
 GPS_BAUD=$(parse_yaml gps_baudrate)
 GPS_BAUD="${GPS_BAUD:-921600}"
 UNICORE_TARGET_BAUD="${UNICORE_TARGET_BAUD:-921600}"
+UNICORE_PROFILE="${UNICORE_PROFILE:-normal}"
 
 # Optional one-shot UM98x config blast — sends MODE ROVER + LOG
 # directives via /configure_receiver.sh. SAVECONFIG persists in NVRAM,
@@ -79,6 +84,8 @@ UNICORE_TARGET_BAUD="${UNICORE_TARGET_BAUD:-921600}"
 # Unicore Setup tool yourself.
 UNICORE_AUTO_CONFIGURE=$(parse_yaml unicore_auto_configure)
 UNICORE_AUTO_CONFIGURE="${UNICORE_AUTO_CONFIGURE:-true}"
+
+unicore_apply_profile_defaults
 
 NTRIP_ENABLED=$(parse_yaml ntrip_enabled)
 NTRIP_ENABLED="${NTRIP_ENABLED:-false}"
@@ -101,7 +108,7 @@ if is_truthy "$UNICORE_AUTO_CONFIGURE"; then
   fi
 fi
 
-echo "[start_gps.sh] Launching Unicore UM982 GNSS driver: port=${GPS_PORT} baud=${GPS_BAUD}"
+echo "[start_gps.sh] Launching Unicore UM982 GNSS driver: port=${GPS_PORT} baud=${GPS_BAUD} profile=${UNICORE_PROFILE}"
 # diagnostics_topic = /diagnostics — the ROS2 standard aggregator topic
 # (matches gps_health_aggregator.py in the ublox path). The GUI's
 # Diagnostics panel reads from /diagnostics; namespacing under
@@ -113,7 +120,16 @@ ros2 run mowgli_unicore_gnss um982_node --ros-args \
   -p "fix_topic:=/gps/fix" \
   -p "heading_topic:=/gps/azimuth" \
   -p "diagnostics_topic:=/diagnostics" \
-  -p "rtcm_topic:=/ntrip_client/rtcm" &
+  -p "rtcm_topic:=/ntrip_client/rtcm" \
+  -p "enable_satellite_status:=$(unicore_bool_string "$UNICORE_ENABLE_SATELLITES")" \
+  -p "enable_satsinfo:=$(unicore_bool_string "$UNICORE_ENABLE_SATELLITES")" \
+  -p "satellite_diag_timeout_sec:=5.0" \
+  -p "enable_rtk_status:=true" \
+  -p "enable_rtcm_status:=true" \
+  -p "enable_rf_status:=$(unicore_bool_string "$UNICORE_ENABLE_RF")" \
+  -p "enable_hw_status:=$(unicore_bool_string "$UNICORE_ENABLE_HARDWARE")" \
+  -p "enable_jamming_status:=$(unicore_bool_string "$UNICORE_ENABLE_JAMMING")" \
+  -p "rf_diag_timeout_sec:=5.0" &
 GPS_PID=$!
 
 if is_truthy "$NTRIP_ENABLED"; then

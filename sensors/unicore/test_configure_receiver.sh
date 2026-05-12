@@ -37,12 +37,42 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local label="${1:?assert_not_contains: missing label}"
+  local needle="${2:?assert_not_contains: missing needle}"
+  local haystack="${3-}"
+
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "FAIL: $label"
+    echo "  unexpected: $needle"
+    echo "  actual:     $haystack"
+    failures=$((failures + 1))
+  else
+    echo "PASS: $label"
+  fi
+}
+
 reset_mocks() {
   COMMAND_LOG=""
   STTY_LOG=""
   CURRENT_BAUD=""
   MOCK_MODEL="unknown"
   MOCK_RESPONDING_BAUDS=""
+}
+
+reset_profile_env() {
+  UNICORE_PROFILE="normal"
+  UNICORE_SIGNALGROUP_OVERRIDE=""
+  UNICORE_MAIN_LOG_PERIOD=""
+  UNICORE_BESTNAV_LOG_PERIOD=""
+  UNICORE_DIAGNOSTIC_LOG_PERIOD=""
+  UNICORE_SATELLITE_LOG_PERIOD=""
+  UNICORE_RF_LOG_PERIOD=""
+  UNICORE_RAW_LOG_PERIOD=""
+  UNICORE_ENABLE_SATELLITES=""
+  UNICORE_ENABLE_RF=""
+  UNICORE_ENABLE_JAMMING=""
+  UNICORE_ENABLE_HARDWARE=""
 }
 
 require_serial_port() { :; }
@@ -118,6 +148,40 @@ assert_eq "UM982 does not resend baud config" "" "$(printf '%s' "$COMMAND_LOG" |
 run_scenario "Unknown model is rejected" "115200" "unknown" "115200" "1"
 assert_eq "Unknown model skips saveconfig" "" "$(printf '%s' "$COMMAND_LOG" | grep -F "SAVECONFIG" || true)"
 assert_eq "Unknown model skips signalgroup" "" "$(printf '%s' "$COMMAND_LOG" | grep -F "CONFIG SIGNALGROUP" || true)"
+
+reset_profile_env
+UNICORE_PROFILE="normal"
+unicore_apply_profile_defaults
+NORMAL_LOGS="$(build_log_commands)"
+assert_not_contains "normal excludes BESTSATA" "BESTSATA" "$NORMAL_LOGS"
+assert_not_contains "normal excludes SATSINFOA" "SATSINFOA" "$NORMAL_LOGS"
+assert_not_contains "normal excludes AGCA" "AGCA" "$NORMAL_LOGS"
+assert_not_contains "normal excludes JAMSTATUSA" "JAMSTATUSA" "$NORMAL_LOGS"
+
+reset_profile_env
+UNICORE_PROFILE="debug"
+unicore_apply_profile_defaults
+DEBUG_LOGS="$(build_log_commands)"
+assert_contains "debug includes BESTSATA" "BESTSATA" "$DEBUG_LOGS"
+assert_contains "debug includes SATSINFOA" "SATSINFOA" "$DEBUG_LOGS"
+assert_contains "debug includes AGCA" "AGCA" "$DEBUG_LOGS"
+assert_contains "debug includes HWSTATUSA" "HWSTATUSA" "$DEBUG_LOGS"
+assert_contains "debug includes JAMSTATUSA" "JAMSTATUSA" "$DEBUG_LOGS"
+assert_contains "debug includes FREQJAMSTATUSA" "FREQJAMSTATUSA" "$DEBUG_LOGS"
+
+reset_profile_env
+UNICORE_PROFILE="survey"
+unicore_apply_profile_defaults
+SURVEY_LOGS="$(build_log_commands)"
+assert_contains "survey includes OBSVMCMPA" "OBSVMCMPA" "$SURVEY_LOGS"
+assert_eq "survey main log period default" "1" "$UNICORE_MAIN_LOG_PERIOD"
+
+reset_profile_env
+UNICORE_PROFILE="high_precision"
+unicore_apply_profile_defaults
+HIGH_PRECISION_COMMANDS="$(build_profile_commands)"
+assert_contains "high_precision enables PVTALG MULTI" "CONFIG PVTALG MULTI" "$HIGH_PRECISION_COMMANDS"
+assert_contains "high_precision enables RTCMDECAUTO" "CONFIG RTCMDECAUTO ENABLE" "$HIGH_PRECISION_COMMANDS"
 
 if [ "$failures" -ne 0 ]; then
   echo ""
