@@ -1,0 +1,34 @@
+# PromoteObstacle — convert a transient tracker observation into a
+# user-validated permanent keepout polygon.
+#
+# After the obstacle-tracker decouple (2026-05-07), map_server no longer
+# auto-mirrors /obstacle_tracker/obstacles into the classification layer
+# or obstacle_polygons_. The tracker output is for monitoring only. To
+# turn one of those tracker observations (or any user-drawn polygon)
+# into a permanent keepout, the GUI calls this service.
+#
+# Effects:
+#   * The polygon is appended to the target area's obstacles list.
+#   * Cells inside become NO_GO_ZONE in the classification layer.
+#   * The keepout mask is rebuilt so Smac/Nav2 see the polygon as lethal.
+#   * The area YAML is persisted so the obstacle survives restart.
+#   * Reachability BFS is re-run for the area (DEAD recompute).
+#
+# Either obstacle_id or polygon must be set:
+#   * obstacle_id != 0  → look up the tracked obstacle with this id in
+#                          the most recent /obstacle_tracker/obstacles
+#                          snapshot (cached in map_server) and use its
+#                          polygon. Easiest GUI path: "promote tracker #N".
+#   * obstacle_id == 0  → use the polygon field directly. Free-form
+#                          path for user-drawn keepouts.
+
+# Target area (must be a mowing area, not a navigation area).
+uint32 area_index
+
+# Either look up the tracker observation by id (recommended), or supply
+# a polygon directly. If both are set, polygon wins.
+uint32 obstacle_id
+geometry_msgs/Polygon polygon
+---
+bool success
+string message
