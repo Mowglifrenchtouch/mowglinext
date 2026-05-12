@@ -14,6 +14,7 @@
 // implementation 1:1.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -86,11 +87,31 @@ public:
   {
     // ── Sample-pair gating thresholds ────────────────────────────────
     min_abs_wheel_ = declare_parameter<double>("min_abs_wheel_ms", 0.05);
+    // Above this |ω| (rad/s, wheel odom angular.z), the latched COG
+    // anchor is suppressed — the previous forward-motion yaw is
+    // stale within tens of ms once the robot starts pivoting. Default
+    // 0.05 rad/s ≈ 3°/s.
+    min_omega_for_anchor_ = declare_parameter<double>("min_omega_for_anchor_rps", 0.05);
+    // Number of consecutive non-rotating GPS samples required before we
+    // start accumulating a new baseline after a pivot ends. 2 samples
+    // at 5 Hz GPS ≈ 400 ms of confirmed straight motion before COG
+    // becomes a valid heading estimate again.
+    rotation_quiet_min_samples_ = declare_parameter<int>("rotation_quiet_min_samples", 2);
     max_pos_accuracy_ = declare_parameter<double>("max_pos_accuracy_m", 0.05);
     min_dt_ = declare_parameter<double>("min_sample_dt_s", 0.05);
     max_dt_ = declare_parameter<double>("max_sample_dt_s", 0.50);
     max_yaw_var_ = declare_parameter<double>("max_yaw_variance", 3.0);
     min_yaw_var_ = declare_parameter<double>("min_yaw_variance", 7.6e-5);
+
+    // Multi-sample baseline accumulator: don't publish a COG yaw until
+    // the robot has travelled this distance since the anchor sample.
+    // Per-pair F9P fixes at 8 Hz / 0.20 m/s yield ~25 mm displacement
+    // and σ_yaw ≈ 18°, which floods fusion_graph with near-useless yaws
+    // that the optimizer must integrate over many nodes before it
+    // converges. Accumulating to e.g. 0.10 m gives σ_yaw ≈ 5° per
+    // publish, so a single COG correction is enough to pull the graph.
+    min_baseline_displacement_m_ =
+        declare_parameter<double>("min_baseline_displacement_m", 0.10);
 
     // ── Stationary yaw latch ────────────────────────────────────────
     stationary_seed_rate_hz_ = declare_parameter<double>("stationary_seed_rate_hz", 2.0);
@@ -127,6 +148,17 @@ public:
         {
           on_wheel(*msg);
         });
+    // Subscribe to /imu/data for the gyro_z rotation gate. At 100 Hz the
+    // IMU sees the start of a pivot ~20 ms before /wheel_odom (50 Hz)
+    // does, which is exactly the window in which a stale on_fix would
+    // otherwise publish a wrong COG yaw.
+    imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+        "/imu/data",
+        qos,
+        [this](sensor_msgs::msg::Imu::ConstSharedPtr msg)
+        {
+          gyro_z_ = msg->angular_velocity.z;
+        });
     pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/cog_heading", qos);
 
     if (enable_mag_cal_)
@@ -161,9 +193,11 @@ public:
     }
 
     RCLCPP_INFO(get_logger(),
-                "cog_to_imu started — publish /imu/cog_heading on every "
-                "RTK-Fixed sample with |wheel_vx| > %.2f m/s (forward + "
-                "reverse, adaptive covariance, no hard speed gate)",
+                "cog_to_imu started — publish /imu/cog_heading once the "
+                "RTK-Fixed baseline accumulates %.3f m at |wheel_vx| > "
+                "%.2f m/s (forward + reverse, adaptive covariance, "
+                "anchor resets on stationary or direction change)",
+                min_baseline_displacement_m_,
                 min_abs_wheel_);
   }
 
@@ -171,6 +205,7 @@ private:
   void on_wheel(const nav_msgs::msg::Odometry& msg)
   {
     wheel_vx_ = msg.twist.twist.linear.x;
+    wheel_omega_ = msg.twist.twist.angular.z;
   }
 
   void on_mag_raw(const sensor_msgs::msg::MagneticField& msg)
@@ -225,52 +260,99 @@ private:
                      static_cast<double>(msg.header.stamp.nanosec) * 1e-9;
     pos_acc = std::max(pos_acc, 0.002);
 
-    if (!have_prev_)
+    // Sample-to-sample dt sanity. A long gap means we lost lock or paused;
+    // the anchor's age would inflate σ_pos and the wheel direction may
+    // have flipped silently — drop the anchor and restart accumulation.
+    if (have_last_sample_)
     {
-      prev_t_ = t;
-      prev_x_ = x;
-      prev_y_ = y;
-      prev_pa_ = pos_acc;
-      have_prev_ = true;
-      return;
-    }
-
-    const double dt = t - prev_t_;
-    if (dt < min_dt_ || dt > max_dt_)
-    {
-      if (dt > max_dt_)
+      const double dt_sample = t - last_sample_t_;
+      if (dt_sample > max_dt_)
       {
-        prev_t_ = t;
-        prev_x_ = x;
-        prev_y_ = y;
-        prev_pa_ = pos_acc;
+        have_anchor_ = false;
+        have_last_sample_ = false;
       }
+      else if (dt_sample < min_dt_)
+      {
+        // Duplicate / out-of-order; ignore but don't disturb anchor.
+        return;
+      }
+    }
+    last_sample_t_ = t;
+    have_last_sample_ = true;
+
+    // Rotation gate. During in-place pivots (PRE_ROTATE, headland turns)
+    // the GPS antenna swings on a lever-arm arc around base_link. Each
+    // arrival sees a 1–3 cm displacement in a direction perpendicular
+    // to the current heading — atan2(dy, dx) of that displacement is
+    // 90° off, and if the anchor was seeded just before the pivot the
+    // accumulated baseline crosses min_baseline_displacement_m_ and a
+    // wrong COG yaw gets published with a very tight (min_yaw_var_)
+    // covariance, snapping the EKF map-frame yaw by tens of degrees.
+    //
+    // Watch BOTH /wheel_odom.twist.angular.z and /imu/data.gyro_z so
+    // the rejection is robust to a brief lag in the wheel encoder
+    // sample — the IMU updates at 100 Hz while wheel_odom is 50 Hz,
+    // and at the transition translation→rotation the IMU sees the
+    // pivot first. The latch also stays asserted for one extra cycle
+    // (rotation_quiet_count_ debounce) so a single low gyro sample
+    // doesn't unlatch us during the rotation.
+    const bool rotating_wheels = std::abs(wheel_omega_) >= min_omega_for_anchor_;
+    const bool rotating_imu = std::abs(gyro_z_) >= min_omega_for_anchor_;
+    if (rotating_wheels || rotating_imu)
+    {
+      rotation_quiet_count_ = 0;
+      ++rejected_rotating_;
+      have_anchor_ = false;
+      return;
+    }
+    // Require a few consecutive non-rotating samples before we trust
+    // wheel_vx_ enough to seed a new anchor. Without this, the very
+    // first GPS arrival after a pivot ends will already have a stale
+    // antenna position from the rotation tail.
+    if (rotation_quiet_count_ < rotation_quiet_min_samples_)
+    {
+      ++rotation_quiet_count_;
+      ++rejected_rotating_;
+      have_anchor_ = false;
       return;
     }
 
-    const double dx = x - prev_x_;
-    const double dy = y - prev_y_;
-    const double displacement = std::hypot(dx, dy);
-    const double pa0 = prev_pa_;
-    prev_t_ = t;
-    prev_x_ = x;
-    prev_y_ = y;
-    prev_pa_ = pos_acc;
+    // Stationary samples don't extend the baseline (GPS noise would just
+    // pollute the integrated displacement). Drop the anchor so we don't
+    // bake a stationary segment into the next yaw computation.
+    if (std::abs(wheel_vx_) < min_abs_wheel_)
+    {
+      ++rejected_stationary_;
+      have_anchor_ = false;
+      return;
+    }
 
-    if (displacement < 0.005)
+    const int wheel_sign = (wheel_vx_ >= 0.0) ? 1 : -1;
+
+    // Anchor seeding / direction-change reset.
+    if (!have_anchor_ || (anchor_wheel_sign_ != 0 && anchor_wheel_sign_ != wheel_sign))
+    {
+      anchor_t_ = t;
+      anchor_x_ = x;
+      anchor_y_ = y;
+      anchor_pa_ = pos_acc;
+      anchor_wheel_sign_ = wheel_sign;
+      have_anchor_ = true;
+      return;
+    }
+
+    const double dx = x - anchor_x_;
+    const double dy = y - anchor_y_;
+    const double displacement = std::hypot(dx, dy);
+
+    if (displacement < min_baseline_displacement_m_)
     {
       ++rejected_displacement_;
       return;
     }
 
-    if (std::abs(wheel_vx_) < min_abs_wheel_)
-    {
-      ++rejected_stationary_;
-      return;
-    }
-
     double yaw;
-    if (wheel_vx_ >= 0.0)
+    if (wheel_sign > 0)
     {
       yaw = std::atan2(dy, dx);
       ++published_fwd_;
@@ -281,9 +363,18 @@ private:
       ++published_rev_;
     }
 
-    const double sigma_pos = std::hypot(pos_acc, pa0);
+    const double sigma_pos = std::hypot(pos_acc, anchor_pa_);
     const double sigma_yaw = std::atan2(2.0 * sigma_pos, std::max(displacement, 1e-3));
     const double yaw_var = std::max(min_yaw_var_, std::min(sigma_yaw * sigma_yaw, max_yaw_var_));
+
+    // Advance the anchor to the current sample so the next baseline starts
+    // fresh — keeps each published yaw independent and bounds the temporal
+    // window over which wheel direction is assumed constant.
+    anchor_t_ = t;
+    anchor_x_ = x;
+    anchor_y_ = y;
+    anchor_pa_ = pos_acc;
+    anchor_wheel_sign_ = wheel_sign;
 
     publish_imu(now(), yaw, yaw_var);
 
@@ -308,6 +399,26 @@ private:
       return;
     }
     if (std::abs(wheel_vx_) >= min_abs_wheel_)
+    {
+      return;
+    }
+    // Also skip the republish while the robot is *rotating in place*.
+    // The latched yaw is the absolute heading from the last forward
+    // motion segment — once the robot pivots, that anchor becomes
+    // stale at ω rad/s. Republishing it as a tight-covariance EKF
+    // measurement would pin the EKF's yaw against the gyro
+    // integration that's correctly tracking the rotation. Threshold
+    // 0.05 rad/s ≈ 3°/s is well above wheel-encoder noise but well
+    // below any deliberate pivot. Watch BOTH /wheel_odom and /imu —
+    // during tight FTC arcs the diff-drive wheel_odom.angular.z
+    // momentarily reports near zero (one wheel near-still) while the
+    // IMU correctly reports the body's rotation rate. Without the
+    // IMU gate, the seed slips through, dumps a +90° (stale)
+    // measurement into the EKF with min_yaw_var_ covariance, and
+    // snaps map→odom by tens of degrees — see the 153° jump at
+    // session 2026-05-11-cog-gate-boundary-debounce, t≈78.28.
+    if (std::abs(wheel_omega_) >= min_omega_for_anchor_ ||
+        std::abs(gyro_z_) >= min_omega_for_anchor_)
     {
       return;
     }
@@ -350,7 +461,7 @@ private:
   {
     RCLCPP_INFO(get_logger(),
                 "cog_to_imu stats: published fwd=%d rev=%d seed=%d, "
-                "rejected fix=%d accuracy=%d stationary=%d displacement=%d, "
+                "rejected fix=%d accuracy=%d stationary=%d rotating=%d displacement=%d, "
                 "mag_cal samples=%zu (writes=%d)",
                 published_fwd_,
                 published_rev_,
@@ -358,6 +469,7 @@ private:
                 rejected_fix_,
                 rejected_accuracy_,
                 rejected_stationary_,
+                rejected_rotating_,
                 rejected_displacement_,
                 mag_samples_.size(),
                 mag_fit_count_);
@@ -367,6 +479,7 @@ private:
     rejected_fix_ = 0;
     rejected_accuracy_ = 0;
     rejected_stationary_ = 0;
+    rejected_rotating_ = 0;
     rejected_displacement_ = 0;
   }
 
@@ -604,6 +717,7 @@ private:
 
   // ── State ─────────────────────────────────────────────────────────
   double min_abs_wheel_{};
+  double min_omega_for_anchor_{};
   double max_pos_accuracy_{};
   double min_dt_{}, max_dt_{};
   double max_yaw_var_{}, min_yaw_var_{};
@@ -624,13 +738,44 @@ private:
 
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr fix_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<sensor_msgs::msg::MagneticField>::SharedPtr mag_sub_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr pub_;
   rclcpp::TimerBase::SharedPtr stats_timer_, stationary_timer_, mag_refit_timer_;
 
-  bool have_prev_{false};
-  double prev_t_{}, prev_x_{}, prev_y_{}, prev_pa_{};
-  double wheel_vx_{0.0};
+  // Baseline accumulator. The COG yaw is computed from the displacement
+  // between an anchor sample and the current sample once the accumulated
+  // displacement crosses min_baseline_displacement_m. The anchor advances
+  // to the current sample after each successful publish; it is reset
+  // whenever the wheel direction changes, the robot is stationary, or
+  // the gap to the previous fix exceeds max_dt_.
+  bool have_anchor_{false};
+  double anchor_t_{}, anchor_x_{}, anchor_y_{}, anchor_pa_{};
+  // Wheel sign at the anchor sample: +1 forward, -1 reverse, 0 unknown.
+  // A change in sign during the baseline invalidates the anchor.
+  int anchor_wheel_sign_{0};
+  double last_sample_t_{};
+  bool have_last_sample_{false};
+  // wheel_vx_ / wheel_omega_ are mutated from the /wheel_odom callback
+  // (50 Hz), gyro_z_ from the /imu/data callback (100 Hz). Both are
+  // read by on_fix() (GPS callback, ~5 Hz) and by
+  // republish_latched_when_stationary() (WallTimer, separate callback
+  // group). The bringup uses MultiThreadedExecutor; without atomics
+  // the read in on_fix could see a torn double from a partially
+  // written update. std::atomic<double> with sequentially-consistent
+  // ordering is a one-cycle penalty per read on x86 — negligible vs
+  // GPS sample rate.
+  std::atomic<double> wheel_vx_{0.0};
+  std::atomic<double> wheel_omega_{0.0};
+  std::atomic<double> gyro_z_{0.0};
+  // Debounce counter for the post-rotation transition: how many
+  // consecutive non-rotating samples we've seen since the last
+  // detected pivot. Reset to 0 on every rotating sample; once it
+  // reaches rotation_quiet_min_samples_, on_fix may seed an anchor
+  // and accumulate baseline again.
+  int rotation_quiet_count_{0};
+  int rotation_quiet_min_samples_{2};
+  double min_baseline_displacement_m_{};
 
   struct LatchedYaw
   {
@@ -649,6 +794,7 @@ private:
   int published_fwd_{0}, published_rev_{0};
   int rejected_stationary_{0}, rejected_accuracy_{0}, rejected_fix_{0};
   int rejected_displacement_{0};
+  int rejected_rotating_{0};
   int stationary_seeds_published_{0};
 };
 

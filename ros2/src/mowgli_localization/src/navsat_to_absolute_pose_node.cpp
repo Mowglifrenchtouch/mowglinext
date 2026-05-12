@@ -364,10 +364,15 @@ void NavSatToAbsolutePoseNode::on_navsat_fix(sensor_msgs::msg::NavSatFix::ConstS
   //        -cos(ψ)·L_x + sin(ψ)·L_y]
   //   Σ_xy_added = J · σ²_ψ · Jᵀ (rank-1 inflation along the lever-arm sweep)
   //
-  // current_yaw_var_ comes from /odometry/filtered_map.covariance[35] and
-  // tracks the EKF's own confidence in yaw. Bootstrap is large (10° σ),
-  // so before the EKF starts publishing every GPS sample is treated as
-  // having an unreliable lever-arm correction — safe.
+  // The yaw variance used for the inflation is a static parameter
+  // (lever_arm_yaw_sigma_, default 3°) — conservative and constant.
+  // An earlier comment claimed the variance was sourced dynamically
+  // from /odometry/filtered_map.covariance[35] (the EKF's own yaw
+  // confidence), but no such subscription exists in this node — the
+  // dynamic-tracking path was never wired. The static 3° σ slightly
+  // under-trusts GPS during yaw-converged phases (cov inflation
+  // larger than strictly necessary) but is never less safe than the
+  // dynamic version would have been.
   if (lever_arm_applied)
   {
     const double Jx = sin_yaw * lever_arm_x_ + cos_yaw * lever_arm_y_;

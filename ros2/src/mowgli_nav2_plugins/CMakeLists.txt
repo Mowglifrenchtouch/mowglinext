@@ -39,8 +39,10 @@ find_package(Eigen3 REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/oscillation_detector.cpp
+  src/obstacle_deviation.cpp
   src/ftc_controller.cpp
   src/ftc_controller_plugin.cpp
+  src/path_progress_goal_checker.cpp
 )
 
 target_include_directories(${PROJECT_NAME}
@@ -72,6 +74,7 @@ ament_target_dependencies(${PROJECT_NAME}
 
 # pluginlib needs the export macro defined.
 pluginlib_export_plugin_description_file(nav2_core ftc_controller_plugin.xml)
+pluginlib_export_plugin_description_file(nav2_core goal_checker_plugin.xml)
 
 # ---------------------------------------------------------------------------
 # Install
@@ -90,7 +93,7 @@ install(
 )
 
 install(
-  FILES ftc_controller_plugin.xml
+  FILES ftc_controller_plugin.xml goal_checker_plugin.xml
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -117,6 +120,23 @@ if(BUILD_TESTING)
   target_include_directories(test_oscillation_detector
     PRIVATE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+
+  ament_add_gtest(test_obstacle_deviation
+    test/test_obstacle_deviation.cpp
+    src/obstacle_deviation.cpp
+  )
+
+  target_include_directories(test_obstacle_deviation
+    PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+
+  ament_target_dependencies(test_obstacle_deviation
+    geometry_msgs
+    nav2_costmap_2d
+    tf2
+    tf2_geometry_msgs
   )
 endif()
 

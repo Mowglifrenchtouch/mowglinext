@@ -168,6 +168,38 @@ ament_target_dependencies(calibrate_imu_yaw_node
 target_link_libraries(calibrate_imu_yaw_node yaml-cpp)
 
 # ---------------------------------------------------------------------------
+# Executable: costmap_scan_filter_node (conditional radial blank for the
+# local_costmap obstacle_layer — masks the dock while charging without
+# opening a 0.10–0.65 m blind ring during normal mowing)
+# ---------------------------------------------------------------------------
+
+add_executable(costmap_scan_filter_node
+  src/costmap_scan_filter_node.cpp
+)
+
+ament_target_dependencies(costmap_scan_filter_node
+  rclcpp
+  sensor_msgs
+  mowgli_interfaces
+)
+
+# ---------------------------------------------------------------------------
+# Executable: scan_deskew_node (motion-compensate sequential LaserScan rays
+# acquired while the robot is rotating — undoes the per-scan ~5° smear at
+# normal turn rates so collision_monitor and the costmap obstacle layer see
+# stationary obstacles instead of jittering ones)
+# ---------------------------------------------------------------------------
+
+add_executable(scan_deskew_node
+  src/scan_deskew_node.cpp
+)
+
+ament_target_dependencies(scan_deskew_node
+  rclcpp
+  sensor_msgs
+)
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 
@@ -185,6 +217,8 @@ install(
     mag_yaw_publisher
     dock_yaw_to_set_pose
     calibrate_imu_yaw_node
+    costmap_scan_filter_node
+    scan_deskew_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -222,6 +256,17 @@ if(BUILD_TESTING)
 
   target_include_directories(test_wheel_odometry PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  # ---- test_costmap_scan_filter ----
+  # Re-implements the static helper so we don't drag rclcpp/main symbols
+  # into the test binary; the helper is small enough to keep in sync by
+  # eye and a regression there will trigger a test failure here.
+  ament_add_gtest(test_costmap_scan_filter
+    test/test_costmap_scan_filter.cpp
+  )
+  ament_target_dependencies(test_costmap_scan_filter
+    sensor_msgs
   )
 endif()
 

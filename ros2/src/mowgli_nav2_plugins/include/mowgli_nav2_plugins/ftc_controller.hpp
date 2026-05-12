@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <limits>
 #include <vector>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -123,7 +124,18 @@ private:
 
   double lat_error_{0.0};
   double lon_error_{0.0};
+  /// Heading error of the carrot in robot frame, **unwrapped**: kept
+  /// continuous across the ±π discontinuity by tracking the previous
+  /// raw atan2 result and adding the smallest 2π-multiple that
+  /// minimises the per-tick change. This prevents a robot whose
+  /// instantaneous heading offset is ~±π from seeing the proportional
+  /// PID flip sign on every tick (issue #200). The PID still operates
+  /// in the same proportional regime — only the discontinuity is
+  /// removed — so behaviour for small heading errors is unchanged.
   double angle_error_{0.0};
+  /// Previous raw atan2 result, used to detect 2π wraps. NaN means
+  /// "no previous sample" (first tick after setPlan).
+  double angle_error_raw_prev_{std::numeric_limits<double>::quiet_NaN()};
   double last_lat_error_{0.0};
   double last_lon_error_{0.0};
   double last_angle_error_{0.0};
@@ -141,6 +153,33 @@ private:
                      double y,
                      unsigned char cost,
                      int max_ids);
+
+  // ── Obstacle deviation ────────────────────────────────────────────────────
+  //
+  // When checkCollision() reports a lethal cell in the lookahead window,
+  // instead of throwing we laterally offset the carrot to skirt the obstacle.
+  // Implementation in mowgli_nav2_plugins/obstacle_deviation.{hpp,cpp}.
+  //
+  //   target_lateral_deviation_ — the offset the algorithm wants right now
+  //                                (positive = left of path heading).
+  //   lateral_deviation_         — the smoothed value actually applied to
+  //                                the carrot, slewed toward the target at
+  //                                config_.deviation_blend_rate m/s.
+  //   is_avoiding_               — true while the deviation is non-zero, used
+  //                                to bias chooseDeviationSide toward the
+  //                                already-chosen side (no zigzag).
+
+  /// Update target / smoothed lateral deviation based on current costmap
+  /// state. Throws ControllerException if the algorithm needs more than
+  /// max_lateral_deviation to find clearance.
+  void updateLateralDeviation(double dt);
+
+  /// Apply lateral_deviation_ to current_control_point_ in-place.
+  void applyLateralDeviationToCarrot();
+
+  bool is_avoiding_{false};
+  double target_lateral_deviation_{0.0};
+  double lateral_deviation_{0.0};
 
   // ── Oscillation detection ─────────────────────────────────────────────────
 
@@ -232,6 +271,15 @@ private:
     bool check_obstacles{true};
     int obstacle_lookahead{5};
     bool obstacle_footprint{true};
+
+    // Obstacle deviation (FTC's "skirt the obstacle" behaviour). When
+    // disabled, hitting an obstacle in lookahead throws ControllerException
+    // (the legacy behaviour). When enabled, the carrot is laterally offset
+    // until the path is clear, then blended back once the obstacle is past.
+    bool enable_obstacle_deviation{true};
+    double max_lateral_deviation{1.5};   // m, abort if needed offset exceeds this
+    double deviation_step{0.05};         // m, search increment
+    double deviation_blend_rate{0.5};    // m/s, slew rate for lateral_deviation_
   };
 
   Config config_;

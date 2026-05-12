@@ -32,6 +32,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(Boost REQUIRED)
 
 # ---------------------------------------------------------------------------
 # Library: mowgli_map_lib
@@ -41,11 +42,17 @@ find_package(visualization_msgs REQUIRED)
 
 add_library(mowgli_map_lib STATIC
   src/map_server_node.cpp
+  src/area_manager.cpp
+  src/coverage_planner.cpp
+  src/costmap_filters.cpp
+  src/progress_tracker.cpp
+  src/remaining_polygon.cpp
 )
 
 target_include_directories(mowgli_map_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+  ${Boost_INCLUDE_DIRS}
 )
 
 ament_target_dependencies(mowgli_map_lib

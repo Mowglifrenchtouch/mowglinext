@@ -217,11 +217,66 @@ std::optional<TickOutput> GraphManager::Tick(double now_s)
 
 TickOutput GraphManager::CreateNodeLocked(double now_s)
 {
+  // Guard against next_index_ == 0: would underflow PoseKey(next_index_ - 1)
+  // and crash GTSAM with "Symbol index is too large" when j wraps to 2^64-1.
+  // Reachable historically when Load() restored an empty persisted graph
+  // (next_index=0) and marked the manager initialized; both Save() and Load()
+  // now refuse the empty case, but keep this defensive — the cost of the
+  // check is one compare and the upside is no abort if a future code path
+  // reintroduces the same hole.
+  if (next_index_ == 0)
+  {
+    return latest_.value_or(TickOutput{});
+  }
+
   // 1. Build the wheel between-factor: relative pose from X_{k-1} to X_k.
-  //    Pose2(dx, dy, dtheta_gyro) — gyro for yaw, wheel for translation.
-  //    If gyro accumulator is zero (no IMU received) fall back to wheel.
-  const double dtheta =
-      std::abs(accum_.dtheta_gyro) > 1e-9 ? accum_.dtheta_gyro : accum_.dtheta_wheel;
+  //    Yaw selection rules:
+  //    a. Wheel encoder is ground truth when it reads zero. Encoders
+  //       cannot slip "into stationary" — when the per-tick wheel
+  //       accumulator shows no motion (|dx|, |dy|, |dtheta_wheel| all
+  //       under their thresholds), the robot really isn't moving under
+  //       power. Trust the wheel regardless of residual gyro
+  //       bias / noise and snap dtheta to 0 with a tight sigma. The
+  //       previous version of this block also gated on |dtheta_gyro| <
+  //       stationary_thresh_theta, which on this robot's live IMU
+  //       (residual wz ≈ -0.023 rad/s ≈ -1.32°/s after hardware_bridge
+  //       calibration, dominated by thermal drift) was always false —
+  //       the AND fell through to the gyro path and yaw drifted
+  //       -4.28°/min vs the +0.43°/min pre-suppressor baseline.
+  //
+  //       Edge case: a hand-pushed robot has wheels off the ground but
+  //       is physically rotating. We accept the trade-off — a manually
+  //       repositioned robot will lose its yaw estimate, but it is far
+  //       more common to be parked with a noisy gyro than to be hand
+  //       spun, and the next session's GPS-COG fusion + dock_yaw seed
+  //       re-anchor yaw when the robot starts moving again.
+  //    b. Otherwise, prefer gyro: at speed the differential-drive yaw
+  //       estimate is dominated by encoder slip and the gyro is strictly
+  //       better. The wheel sigma_theta path only fires when no gyro
+  //       sample arrived this tick (pre-cog seed window, IMU restart).
+  const bool wheel_stationary =
+      std::abs(accum_.dx) < params_.stationary_thresh_xy_m &&
+      std::abs(accum_.dy) < params_.stationary_thresh_xy_m &&
+      std::abs(accum_.dtheta_wheel) < params_.stationary_thresh_theta;
+
+  double dtheta;
+  double sigma_theta;
+  if (wheel_stationary)
+  {
+    dtheta = 0.0;
+    sigma_theta = params_.stationary_sigma_theta;
+  }
+  else if (std::abs(accum_.dtheta_gyro) > 1e-9)
+  {
+    dtheta = accum_.dtheta_gyro;
+    sigma_theta = params_.gyro_sigma_theta;
+  }
+  else
+  {
+    dtheta = accum_.dtheta_wheel;
+    sigma_theta = params_.wheel_sigma_theta;
+  }
+
   const gtsam::Pose2 between(accum_.dx, accum_.dy, dtheta);
 
   const auto k_prev = PoseKey(next_index_ - 1);
@@ -242,9 +297,9 @@ TickOutput GraphManager::CreateNodeLocked(double now_s)
   new_values_.insert(k_curr, X_pred);
 
   // 2. Wheel between-factor.
-  // Use gyro_sigma_theta when gyro contributed, wheel sigma otherwise.
-  const double sigma_theta =
-      std::abs(accum_.dtheta_gyro) > 1e-9 ? params_.gyro_sigma_theta : params_.wheel_sigma_theta;
+  // sigma_theta was already selected above with the same wheel/gyro/
+  // stationary logic that drove dtheta — reuse it here so both halves
+  // of the BetweenFactor stay consistent.
   auto between_noise = MakeDiagonal({
       params_.wheel_sigma_x,
       params_.wheel_sigma_y,
@@ -690,6 +745,13 @@ void GraphManager::Reset()
 bool GraphManager::Save(const std::string& prefix) const
 {
   std::lock_guard<std::mutex> lock(mu_);
+  // Refuse to persist an empty graph. An auto-save fired right after a
+  // Reset() would otherwise overwrite the on-disk files with
+  // next_index=0 / count=0; on next launch Load() restored that state,
+  // marked initialized_, and the first Tick crashed with a Symbol-index
+  // underflow. Keep whatever good state was on disk before the reset.
+  if (!initialized_ || next_index_ == 0)
+    return false;
   // Manual / on-checkpoint path. Always refreshes from iSAM2 — the
   // serialized state must reflect all factor updates since the last
   // RefreshEstimateLocked() call.
@@ -787,6 +849,15 @@ bool GraphManager::Load(const std::string& prefix)
   {
     return false;
   }
+
+  // Refuse to restore a degenerate persisted state. With next_idx == 0
+  // (or no values at all) marking initialized_ would let CreateNodeLocked
+  // form PoseKey(next_idx - 1) and underflow into a 2^64-1 Symbol index
+  // — GTSAM throws std::invalid_argument and the process aborts. Treat
+  // this as "no graph on disk" so the node bootstraps from the next GPS
+  // / set_pose seed.
+  if (next_idx == 0 || loaded_values.empty())
+    return false;
 
   // Re-seed iSAM2 with each loaded pose pinned by a tight prior; the
   // priors keep optimization stable as new wheel/GPS factors arrive.

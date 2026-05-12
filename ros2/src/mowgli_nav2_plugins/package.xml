@@ -35,5 +35,6 @@
   <export>
     <build_type>ament_cmake</build_type>
     <nav2_core plugin="${prefix}/ftc_controller_plugin.xml"/>
+    <nav2_core plugin="${prefix}/goal_checker_plugin.xml"/>
   </export>
 </package>

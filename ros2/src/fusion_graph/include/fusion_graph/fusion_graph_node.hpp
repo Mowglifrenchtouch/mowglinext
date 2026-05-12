@@ -86,6 +86,15 @@ private:
   // Cold-boot relocalization state.
   bool autoload_succeeded_ = false;
   bool relocalize_done_ = false;
+  // Set true once an RTK-Fixed GPS sample has overridden the autoloaded
+  // pose with ForceAnchor. One-shot per boot — subsequent RTK fixes flow
+  // through as normal GnssLeverArmFactor observations.
+  bool rtk_autoload_override_done_ = false;
+  // Distance threshold (m) above which an RTK-Fixed GPS sample is
+  // considered to disagree with the autoloaded pose enough to force a
+  // re-anchor. Below this, the autoloaded pose is trusted and GPS just
+  // contributes factors normally.
+  double rtk_autoload_override_threshold_m_ = 0.3;
   double dock_pose_yaw_ = 0.0;
 
   // Latched datum (read from parameters at startup).
@@ -119,6 +128,16 @@ private:
   std::string map_frame_ = "map";
   std::string odom_frame_ = "odom";
   std::string base_frame_ = "base_footprint";
+
+  // Forward-stamps the published map→odom TF by this many seconds so that
+  // controllers/costmaps querying lookupTransform at clock_->now() always
+  // find a TF stamp in the buffer that is >= their request time, letting
+  // tf2 interpolate back instead of throwing ExtrapolationException. Only
+  // needed under sim_time, where Nav2 cycles can fall a few ms ahead of
+  // the latest publish; safe on real hardware too because map→odom moves
+  // very slowly relative to typical lead times (~100 ms = sub-cm error
+  // even at full transit speed).
+  double tf_publish_lead_s_ = 0.0;
 
   // Subscriptions.
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_wheel_;

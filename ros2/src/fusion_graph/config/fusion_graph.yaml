@@ -6,10 +6,15 @@
 fusion_graph_node:
   ros__parameters:
     # ── Graph cadence ──────────────────────────────────────────────────
-    # 10 Hz nodes match what ekf_map_node was running. Higher rates
-    # blow up iSAM2 cost on ARM; lower rates make GPS lever-arm yaw
-    # coupling sluggish during turns.
-    node_period_s: 0.1
+    # 50 Hz nodes — TF map→odom needs to publish faster than the
+    # controller queries (5 Hz). At 50 Hz (20 ms period) the latest
+    # TF stamp is always within 20 ms of any controller lookup, well
+    # under the 200 ms transform_tolerance. 30 Hz wasn't enough — the
+    # Extrapolation Error fires on a 1-3 ms phase offset between
+    # sim_time-at-query and sim_time-at-publish, regardless of the
+    # absolute rate, so we just need the TF gaps to be smaller than
+    # whatever forward-skew the controller uses internally.
+    node_period_s: 0.02
 
     # ── Wheel between-factor noise ─────────────────────────────────────
     # Per-node sigmas in body frame. wheel_sigma_y << wheel_sigma_x is
@@ -23,6 +28,20 @@ fusion_graph_node:
     # tighter than wheel-derived yaw on a differential drive (the
     # encoders see ~5-10 cm of slip per turn).
     gyro_sigma_theta: 0.005     # rad per node
+
+    # Stationary-yaw drift suppressor (added 2026-05-03, iterated same
+    # day after on-robot measurement showed the AND-gated version drove
+    # yaw -4.28°/min vs +0.43°/min unsuppressed — live IMU residual wz
+    # is ~-1.32°/s, well above any sensible gyro stationary threshold,
+    # so the AND was always false). The gate is now wheel-only: when
+    # the per-tick wheel accumulator (|dx|, |dy|, |dtheta_wheel|) is
+    # under these thresholds, the BetweenFactor uses dtheta=0 with
+    # stationary_sigma_theta regardless of gyro noise. Encoders cannot
+    # slip into stationary, so a zero wheel reading is treated as
+    # ground truth.
+    stationary_thresh_xy_m: 0.001
+    stationary_thresh_theta: 0.002
+    stationary_sigma_theta: 0.001
 
     # ── GPS unary noise floor ──────────────────────────────────────────
     # Below this sigma, NavSatFix.covariance is treated as unrealistic
@@ -49,3 +68,16 @@ fusion_graph_node:
     map_frame: map
     odom_frame: odom
     base_frame: base_footprint
+
+    # ── TF publish lead time ──────────────────────────────────────────
+    # Forward-stamps the published map→odom TF by this many seconds so
+    # Nav2 controllers (notably nav2_rotation_shim_controller, which
+    # calls transformPoseInTargetFrame with input_pose.header.stamp =
+    # clock_->now()) always find a TF stamp in the buffer that is >=
+    # the request time. Without this, lookups would fall 1-3 ms ahead
+    # of the latest publish under sim_time and throw
+    # ExtrapolationException, freezing cmd_vel publication. Safe under
+    # real hardware too — map→odom changes very slowly (it's the
+    # GPS/scan correction to dead reckoning), so 100 ms of lead is
+    # sub-cm error even at full transit speed. Set to 0.0 to disable.
+    tf_publish_lead_s: 0.1
