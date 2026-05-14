@@ -666,8 +666,16 @@ private:
   /// Tracker ids whose polygons we have already pushed into the
   /// classification layer via the auto-promotion path (on_obstacles).
   /// Bounded growth: each PERSISTENT obstacle id is auto-promoted at
-  /// most once per node lifetime. Cleared on `~/clear_obstacles`.
+  /// most once per node lifetime. Cleared on `~/clear_obstacles`. Only
+  /// populated when auto_promote_persistent_obstacles_ is true.
   std::set<uint32_t> auto_promoted_obstacle_ids_;
+
+  /// When false (default), tracker observations never become permanent
+  /// keepouts on their own — only the operator-driven ~/promote_obstacle
+  /// service mutates the classification layer. When true, restores the
+  /// pre-2026-05-13 behavior where any PERSISTENT TrackedObstacle inside
+  /// a mowing area is auto-stamped as OBSTACLE_PERMANENT.
+  bool auto_promote_persistent_obstacles_{false};
 
   /// Docking point in map frame.
   geometry_msgs::msg::Pose docking_pose_;

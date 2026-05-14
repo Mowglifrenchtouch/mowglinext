@@ -127,6 +127,17 @@ MapServerNode::MapServerNode(const rclcpp::NodeOptions& options)
   dock_approach_corridor_half_width_m_ =
       declare_parameter<double>("dock_approach_corridor_half_width_m", 0.40);
 
+  // When false (default), tracker observations stay TENTATIVE/CONFIRMED/
+  // PERSISTENT but are NEVER stamped into a mowing area's classification
+  // layer without operator action. The GUI's "Promote obstacle" button
+  // (which calls ~/promote_obstacle) is the only path to a permanent
+  // keepout. This avoids the failure mode where a parked car, a person
+  // standing still, or a misclassified sensor blob persistently shrinks
+  // the mowable area without anyone noticing — the previous default ate
+  // the polygon over time.
+  auto_promote_persistent_obstacles_ =
+      declare_parameter<bool>("auto_promote_persistent_obstacles", false);
+
   RCLCPP_INFO(get_logger(),
               "MapServerNode: resolution=%.3f m, size=%.1f×%.1f m, frame='%s'",
               resolution_,
@@ -611,6 +622,14 @@ void MapServerNode::on_obstacles(mowgli_interfaces::msg::ObstacleArray::ConstSha
   {
     std::lock_guard<std::mutex> lock(map_mutex_);
     last_tracker_snapshot_ = msg->obstacles;
+
+    // Auto-promotion is opt-in (default off). Snapshot still updates so
+    // the GUI / ~/promote_obstacle service can resolve a tracker id; we
+    // just skip the automatic stamp into the classification layer.
+    if (!auto_promote_persistent_obstacles_)
+    {
+      return;
+    }
 
     for (const auto& obs : msg->obstacles)
     {

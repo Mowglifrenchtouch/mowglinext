@@ -132,6 +132,22 @@ void MapServerNode::on_get_remaining_area_polygon(
     }
     original.inners().emplace_back(obs.outer().begin(), obs.outer().end());
   }
+  // Dock body lives on the CLASSIFICATION layer (OBSTACLE_PERMANENT) but
+  // remaining_polygon only reads MOW_PROGRESS — so without this hole the
+  // F2C planner happily lays swaths over the dock structure. Inject the
+  // dock body polygon as an inner ring so the area = mowable_outer minus
+  // (operator obstacles ∪ dock body). The corridor is intentionally NOT
+  // subtracted: it stays mowable so the robot can drive across it on the
+  // way home, just classified as DOCKING_AREA for the keepout carve-out.
+  if (has_dock_exclusion_ && dock_body_polygon_.points.size() >= 3)
+  {
+    BgPolygon dock_body_bg = to_bg_polygon(dock_body_polygon_);
+    if (!dock_body_bg.outer().empty())
+    {
+      original.inners().emplace_back(dock_body_bg.outer().begin(),
+                                     dock_body_bg.outer().end());
+    }
+  }
   bg::correct(original);
 
   // 2. Walk mow_progress over the area polygon, collect mowed cell positions.
