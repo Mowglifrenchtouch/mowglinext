@@ -26,8 +26,8 @@ mowgli:
     chassis_height: 0.19
     chassis_mass_kg: 8.76
 
-    # Drive wheels (rear) — physical wheel diameter 186 mm → radius 0.093 m
-    wheel_radius: 0.093
+    # Drive wheels (rear)
+    wheel_radius: 0.04475
     wheel_width: 0.04
     wheel_track: 0.325         # centre-to-centre (from OpenMower).
                                # Read by hardware_bridge_node and URDF.
@@ -49,7 +49,7 @@ mowgli:
     imu_cal_samples: 200
     imu_cal_persist_path: /ros2_ws/maps/imu_calibration.txt
     imu_cal_auto_rest_sec: 15.0
-    imu_cal_periodic_recal_sec: 60.0
+    imu_cal_periodic_recal_sec: 600.0
     # Magnetometer fusion (consumed by cog_to_imu_node + mag_yaw_publisher_node)
     enable_mag_cal: false
     mag_calibration_path: /ros2_ws/maps/mag_calibration.yaml
@@ -58,10 +58,10 @@ mowgli:
     mag_yaw_variance: 0.0027
     # Dock seeding (consumed by dock_yaw_to_set_pose)
     dock_pose_yaw_sigma_rad: 0.035
-    # (Informational: circumference 2π·0.093 = 0.584 m, so
-    #  300 ticks/m × 0.584 m/rev ≈ 175 ticks per revolution. ticks_per_meter
-    #  is declared once above; this comment stays as the wheel-size
-    #  cross-check.)
+    # Informational only — circumference 2π·0.04475 = 0.281 m, so
+    # 300 ticks/m × 0.281 m/rev ≈ 84 ticks per revolution. Kept as a
+    # cross-check for future wheel-size changes.
+    ticks_per_revolution: 84
 
     # Front casters
     caster_radius: 0.03
@@ -83,18 +83,11 @@ mowgli:
     lidar_z: 0.22              # vertical offset (m)
     lidar_yaw: 3.1408          # heading offset (rad) — ~π for 180°-rotated mount
 
-    # IMU mounting (relative to base_link = wheel axis centre).
-    # imu_pitch / imu_roll: bench-zero default. The hardware_bridge
-    # IMU calibration phase logs the implied mounting offset on each
-    # docking event; promote any sustained |offset| > 1° here so that
-    # gravity removal stops leaking into yaw integration. See
-    # CLAUDE.md invariant 6.
+    # IMU mounting (relative to base_link = wheel axis centre)
     imu_x: 0.18                # forward offset from wheel axis (m)
     imu_y: 0.0                 # lateral offset (m)
     imu_z: 0.095               # vertical offset (m) — base_height / 2
-    imu_roll: 0.0              # mounting roll  (rad)
-    imu_pitch: 0.0             # mounting pitch (rad)
-    imu_yaw: 0.0               # heading offset (rad) — auto-calibrated via GUI button
+    imu_yaw: 0.0               # heading offset (rad) — if IMU is rotated
 
     # GPS antenna mounting (relative to base_link = wheel axis centre)
     # From OpenMower: OM_ANTENNA_OFFSET_X=0.3 (antenna on front top cover)
@@ -111,14 +104,7 @@ mowgli:
     # robots equipped with LiDAR + RTK GPS where you want
     # scan-matching-driven map-frame consistency through RTK-Float
     # gaps.
-    use_fusion_graph: true
-
-    # lidar_enabled (default true): if false, navigation.launch.py boots
-    # the no-lidar config (different costmap setup, FollowPath without
-    # obstacle layer) — useful for hardware bring-up before the LiDAR
-    # is mounted. The launch CLI arg is still `use_lidar:=true|false`
-    # for command-line overrides; the YAML key is the per-site default.
-    lidar_enabled: true
+    use_fusion_graph: false
 
     # use_magnetometer (default false): subscribe to /imu/mag_yaw and
     # let it influence the map-frame yaw. The chassis motor field
@@ -133,7 +119,7 @@ mowgli:
     # rmse-scaled covariance — bounded drift between consecutive
     # nodes even without GPS. Required for "robot keeps mowing
     # through GPS dropouts" scenarios.
-    use_scan_matching: true
+    use_scan_matching: false
 
     # use_loop_closure (default false; only effective when
     # use_scan_matching is also true): on every new node, search
@@ -142,7 +128,7 @@ mowgli:
     # that snaps the trajectory back to consistency with previously-
     # seen places. Resets accumulated drift across multi-minute GPS-
     # less stretches at the cost of one ICP per candidate per tick.
-    use_loop_closure: true
+    use_loop_closure: false
 
     # -----------------------------------------------------------------
     # GPS / Positioning
@@ -150,11 +136,8 @@ mowgli:
     gps_protocol: "UBX"
     datum_lat: 0.0             # map origin latitude  (set per-site)
     datum_lon: 0.0             # map origin longitude (set per-site)
-    # (Removed 2026-05-10: gps_wait_after_undock_sec / gps_timeout_sec
-    #  had no readers anywhere on the runtime path. The BT's
-    #  CalibrateHeadingFromUndock and the GPS health check use their own
-    #  hardcoded values. Re-add here if/when those nodes are
-    #  parameterised.)
+    gps_wait_after_undock_sec: 10.0   # wait for RTK fix after undocking
+    gps_timeout_sec: 5.0              # pause mowing if no GPS for this long
 
     # NTRIP (RTK correction stream)
     ntrip_enabled: false
@@ -185,22 +168,9 @@ mowgli:
     outline_offset: 0.05           # inward offset from boundary (m)
     mow_angle_offset_deg: -1.0    # -1 = auto-detect optimal angle
     mow_angle_increment_deg: 0.0  # rotate pattern each full pass
-    # F2C v2 coverage tuning (mowgli_coverage server).
-    #   headland_width — outer strip mowed first as N concentric rings
-    #     before the inner-field swaths. F2C ConstHL inset =
-    #     headland_width; generateHeadlandSwaths emits
-    #     ceil(headland_width / tool_width) perimeter passes. Set to
-    #     2-3x tool_width for one full perimeter lap.
-    #   min_turning_radius — F2C Robot::setMinTurningRadius. Bounds the
-    #     Dubins arc radius between swaths and between sub-cells. Diff-
-    #     drive mowers can pivot in place — keep this small (~ 0.05 m)
-    #     so the arc connectors collapse to straight + PRE_ROTATE,
-    #     which FTC handles natively. An Ackermann variant would set
-    #     this to its real turn radius.
-    # (path_spacing was retired with the tool_width unification — F2C
-    #  swath spacing is now Robot::setCovWidth = tool_width directly.)
-    headland_width: 0.35
-    min_turning_radius: 0.05
+    headland_width: 0.18           # headland = 1 × tool_width
+    path_spacing: 0.18             # = tool_width for full coverage
+    min_turning_radius: 0.30       # differential drive can turn tight
 
     # -----------------------------------------------------------------
     # Docking
@@ -213,21 +183,13 @@ mowgli:
     dock_approach_distance: 1.0    # distance to staging pose in front of dock
     dock_max_retries: 3
     dock_use_charger_detection: true
-    # Dock body — physical structure the robot cannot drive through. Cells
-    # inside this rectangle (centred on dock_pose, axes aligned with
-    # dock_pose_yaw) are marked OBSTACLE_PERMANENT: F2C strips stop at
-    # the body edge and Smac sees them as lethal. Defaults match the
-    # YardForce500 dock; measure your dock and override per site.
-    dock_body_length_m: 0.80       # extent along dock -X (depth into dock)
-    dock_body_width_m: 0.55        # extent along dock ±Y (lateral)
 
     # -----------------------------------------------------------------
     # Rain
     # -----------------------------------------------------------------
     # Modes: 0=ignore, 1=dock, 2=dock_until_dry, 3=pause_auto
     rain_mode: 2
-    # (rain_delay_minutes removed 2026-05-10 — no reader in BT or
-    #  hardware_bridge. Re-add when behavior_tree_node consumes it.)
+    rain_delay_minutes: 30.0       # wait after rain stops before resuming
     rain_debounce_sec: 10.0        # rain must persist this long to trigger
 
     # -----------------------------------------------------------------
@@ -241,14 +203,7 @@ mowgli:
     # -----------------------------------------------------------------
     # Navigation tolerances (garden terrain)
     # -----------------------------------------------------------------
-    xy_goal_tolerance: 0.10        # metres — acceptable goal position error (transit)
-    yaw_goal_tolerance: 0.20       # radians — acceptable heading error (~11°, transit)
-    # coverage_xy_tolerance MUST stay below tool_width (0.18 m). The
-    # SimpleGoalChecker (used by FollowCoveragePath) fires when the robot
-    # is within tolerance of the strip's END pose. Coverage strips are
-    # short (<3 m, often <0.5 m), so any value > strip length lets the
-    # controller declare 'reached' on tick 1 — the BT loops
-    # GetNextSegment forever without moving the robot. Field-broken
-    # 2026-05-08 with the old 0.5 m default.
-    coverage_xy_tolerance: 0.05    # metres — tight to force path tracing
+    xy_goal_tolerance: 0.75        # metres — acceptable goal position error
+    yaw_goal_tolerance: 1.0        # radians — acceptable heading error
+    coverage_xy_tolerance: 0.5     # metres — for coverage waypoints
     progress_timeout_sec: 60.0     # seconds without progress before recovery

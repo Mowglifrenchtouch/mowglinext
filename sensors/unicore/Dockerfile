@@ -6,12 +6,12 @@
 # 'GPS: fix/satellites/NTRIP/RTCM' diagnostics restructure is open.
 # Once merged into mowglifrenchtouch/UM982Driver@mowgli, flip back to
 # the upstream URL.
-ARG UM982_REPO=https://github.com/cedbossneo/UM982Driver.git
-ARG UM982_REF=feat/ntrip-gga-rtk-status-gsv
+ARG UM982_REPO=https://github.com/cedbossneo/unicore-ros2
+ARG UM982_REF=main
 # Bump UM982_SHA to bust the docker layer cache when the fork moves.
 # `git clone --branch` is cacheable per ARG value, so without a SHA
 # pin we rebuild against stale code.
-ARG UM982_SHA=e36c74eaa678dc0f861d8e63e7f52394a243a00a
+ARG UM982_SHA=8a0d98aae8f9b2fc98285352dcab2013523e9410
 
 FROM ros:kilted-ros-base AS builder
 
@@ -58,7 +58,7 @@ RUN --mount=type=cache,target=/root/.ccache,sharing=locked \
       --base-paths src/um982_driver/compass_msgs \
                    src/um982_driver/ntrip_client_node \
                    src/um982_driver \
-      --packages-up-to ntrip_client_node mowgli_unicore_gnss \
+      --packages-up-to ntrip_client_node unicore_gnss \
       --cmake-args \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER_LAUNCHER=ccache \

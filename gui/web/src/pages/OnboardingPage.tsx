@@ -992,7 +992,7 @@ const OnboardingWizard: React.FC = () => {
                 {currentStep === 0 && <WelcomeStep onNext={handleNext} />}
                 {currentStep === 1 && <RobotModelStep values={localValues} onChange={handleChange} />}
                 {currentStep === 2 && <FirmwareStep onNext={handleNext} />}
-                {currentStep === 3 && <GpsStep values={localValues} onChange={handleChange} />}
+                {currentStep === 3 && <GpsStep values={localValues} onChange={handleChange} gpsRestarting={gpsRestarting} />}
                 {currentStep === 4 && <SensorStep values={localValues} onChange={handleChange} />}
                 {currentStep === 5 && <ImuYawStep values={localValues} onChange={handleChange} />}
                 {currentStep === 6 && <DatumStep values={localValues} onChange={handleChange} gpsRestarting={gpsRestarting} />}

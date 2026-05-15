@@ -64,11 +64,11 @@ rosdep install \
 # Build the workspace.
 # ---------------------------------------------------------------------------
 echo "Building workspace (this may take a few minutes on first run)..."
-# mowgli_unicore_gnss is a stub package.xml under sensors/unicore/ (no
+# unicore_gnss is a stub package.xml under sensors/unicore/ (no
 # CMakeLists in tree — it lives in the GPS Docker image build context).
 # colcon discovers it via the workspace mount and would fail; ignore it.
 colcon build \
-    --packages-ignore mowgli_unicore_gnss \
+    --packages-ignore unicore_gnss \
     --cmake-args \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_TESTING=OFF \
