@@ -84,6 +84,13 @@ private:
   // and the briefly-outside chassis is unsafe — then the cost is
   // a strip of unmowed grass at the edge.
   double chassis_safety_inset_{0.0};
+  // Operator override for the number of concentric headland rings.
+  // 0 = auto, derive from ceil(headland_width / op_width). Anything
+  // > 0 forces exactly that many rings regardless of headland_width —
+  // useful when an operator wants a single perimeter pass for time
+  // savings on a polygon whose `headland_width` would otherwise imply
+  // 2-3 rings, or conversely to add an extra ring on a sloppy edge.
+  int num_headland_passes_{0};
   // Drop sub-cells from TrapezoidalDecomp whose area is smaller
   // than this threshold (m²). With tool_width = 0.18 a sub-cell
   // under ~ 2 × tool_width² = 0.065 m² can't fit a single swath

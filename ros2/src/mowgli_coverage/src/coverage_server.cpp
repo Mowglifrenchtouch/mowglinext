@@ -45,6 +45,8 @@ nav2_util::CallbackReturn CoverageServer::on_configure(
   max_diff_curvature_ = declare_parameter<double>("linear_curv_change", 200.0);
   chassis_safety_inset_ =
       declare_parameter<double>("chassis_safety_inset", 0.0);
+  num_headland_passes_ =
+      declare_parameter<int>("num_headland_passes", 0);
   min_subcell_area_m2_ =
       declare_parameter<double>("min_subcell_area_m2", 0.065);
 
@@ -313,13 +315,19 @@ void CoverageServer::computeCoveragePath()
     // never gets mowed (ConstHL.generateHeadlands only INSETS the
     // planning field, doesn't generate rings to traverse it).
     //
-    // n_passes = ceil(headland_width / op_width). One pass minimum.
+    // n_passes: operator override (num_headland_passes_, set via
+    // mowgli_robot.yaml → coverage_server param) when > 0, otherwise
+    // auto-derive as ceil(headland_width / op_width). One pass minimum.
     // dir_out2in=true: the outer ring is the first one in the vector,
     // so the robot follows the polygon perimeter first then spirals
     // inward toward the F2C swath start.
     f2c::types::Path headland_path;
-    const int n_headland_passes = std::max(
-        1, static_cast<int>(std::ceil(headland_width / robot.getCovWidth())));
+    const int n_headland_passes =
+        (num_headland_passes_ > 0)
+            ? num_headland_passes_
+            : std::max(1,
+                       static_cast<int>(std::ceil(
+                           headland_width / robot.getCovWidth())));
     // Use safe_cells (pre-inset polygon) so the outermost headland
     // ring sits at chassis_safety_inset_ + op_width/2 from the real
     // polygon edge — keeps the chassis inside under FTC tracking

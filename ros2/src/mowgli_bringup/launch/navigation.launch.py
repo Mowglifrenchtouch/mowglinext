@@ -337,6 +337,17 @@ def generate_launch_description() -> LaunchDescription:
     headland_width = 0.35
     min_turning_radius = 0.05
     progress_timeout_sec = 300.0
+    # num_headland_passes: 0 = auto (ceil(headland_width / tool_width)),
+    # >0 forces exactly that many concentric perimeter rings.
+    num_headland_passes = 0
+    # chassis_safety_inset: how far INSIDE the operator polygon the F2C
+    # planning field is pre-shrunk before any swath/headland computation.
+    # Default = chassis_width / 2 (computed below) so the chassis edge
+    # cannot cross the polygon boundary under perfect FTC tracking;
+    # tracking error then has to overshoot by half the chassis to escape,
+    # which is well outside FTC's <10 mm lateral spec on coverage swaths.
+    # An explicit override in mowgli_robot.yaml wins over the default.
+    chassis_safety_inset = None
     # Dock approach distance: how far behind the dock the opennav_docking
     # staging pose sits. Edited as `dock_approach_distance` in the GUI
     # (positive metres), injected here as the negative-X
@@ -404,6 +415,16 @@ def generate_launch_description() -> LaunchDescription:
         headland_width = float(rt_rp.get("headland_width", headland_width))
         min_turning_radius = float(rt_rp.get(
             "min_turning_radius", min_turning_radius))
+        num_headland_passes = int(rt_rp.get(
+            "num_headland_passes", num_headland_passes))
+        # Operator override wins; otherwise fall back to chassis_width/2
+        # (cw was already read above from the same runtime config).
+        if "chassis_safety_inset" in rt_rp:
+            chassis_safety_inset = float(rt_rp["chassis_safety_inset"])
+    if chassis_safety_inset is None:
+        # cw is the chassis width read from the same runtime config a few
+        # lines above; default the inset to half of it.
+        chassis_safety_inset = cw / 2.0
 
     # Compute BT XML paths from installed package shares (not hardcoded).
     bt_nav_to_pose_xml = os.path.join(
@@ -499,6 +520,8 @@ def generate_launch_description() -> LaunchDescription:
         cov_params["operation_width"] = tool_width
         cov_params["default_headland_width"] = headland_width
         cov_params["min_turning_radius"] = min_turning_radius
+        cov_params["num_headland_passes"] = num_headland_passes
+        cov_params["chassis_safety_inset"] = chassis_safety_inset
 
         tmp = tempfile.NamedTemporaryFile(
             mode="w", prefix="mowgli_nav2_", suffix=".yaml", delete=False)
