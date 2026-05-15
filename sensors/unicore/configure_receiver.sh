@@ -307,19 +307,40 @@ unicore_log_command_variants() {
 
 unicore_classify_command_response() {
   local response="${1-}"
+  local command="${2:-$UNICORE_LAST_SERIAL_COMMAND}"
+  local line status saw_ignored=0 saw_invalid=0
   local collapsed="${response,,}"
   local compact="${collapsed//[$' \t\r\n']/}"
 
   if [ -z "$compact" ]; then
-    printf '%s\n' "no_response"
-    return 0
-  fi
-  if [[ "$collapsed" == *"unsupported"* || "$collapsed" == *"parsing failed"* || "$collapsed" == *"grammar error"* ]]; then
-    printf '%s\n' "unsupported"
+    printf '%s\n' "timeout"
     return 0
   fi
 
-  printf '%s\n' "ok"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    status="$(unicore_classify_command_response_line "$command" "$line")"
+    case "$status" in
+      ok|unsupported)
+        printf '%s\n' "$status"
+        return 0
+        ;;
+      ignored_stream_data)
+        saw_ignored=1
+        ;;
+      invalid_response)
+        saw_invalid=1
+        ;;
+    esac
+  done <<<"$response"
+
+  if [ "$saw_invalid" -eq 1 ]; then
+    printf '%s\n' "invalid_response"
+  elif [ "$saw_ignored" -eq 1 ]; then
+    printf '%s\n' "ignored_stream_data"
+  else
+    printf '%s\n' "timeout"
+  fi
 }
 
 unicore_first_response_line() {
@@ -328,14 +349,137 @@ unicore_first_response_line() {
   printf '%s\n' "${response%%$'\n'*}"
 }
 
+unicore_log_preview() {
+  local response="${1-}"
+  local preview
+
+  preview="$(unicore_first_response_line "$response")"
+  printf '%s' "$preview" | LC_ALL=C tr -cd '\11\12\15\40-\176' | cut -c1-180
+}
+
+unicore_log_preview_for_status() {
+  local response="${1-}"
+  local command="${2:-$UNICORE_LAST_SERIAL_COMMAND}"
+  local wanted_status="${3:-}"
+  local line status preview=""
+
+  if [ -n "$wanted_status" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] || continue
+      status="$(unicore_classify_command_response_line "$command" "$line")"
+      if [ "$status" = "$wanted_status" ]; then
+        preview="$line"
+        break
+      fi
+    done <<<"$response"
+  fi
+
+  if [ -z "$preview" ]; then
+    preview="$(unicore_first_response_line "$response")"
+  fi
+  printf '%s' "$preview" | LC_ALL=C tr -cd '\11\12\15\40-\176' | cut -c1-180
+}
+
+unicore_normalize_command_for_match() {
+  local command="${1-}"
+
+  command="${command//$'\r'/ }"
+  command="${command//$'\n'/ }"
+  command="${command//,/ }"
+  command="$(printf '%s\n' "$command" | awk '{$1=$1; print toupper($0)}')"
+  printf '%s\n' "$command"
+}
+
+unicore_command_ack_target_matches() {
+  local command="${1-}"
+  local ack_target="${2-}"
+  local normalized_command normalized_ack
+
+  normalized_command="$(unicore_normalize_command_for_match "$command")"
+  normalized_ack="$(unicore_normalize_command_for_match "$ack_target")"
+  [ -n "$normalized_command" ] || return 1
+  [ -n "$normalized_ack" ] || return 1
+
+  if [ "$normalized_ack" = "$normalized_command" ]; then
+    return 0
+  fi
+  case "$normalized_command" in
+    "$normalized_ack "*) return 0 ;;
+  esac
+
+  return 1
+}
+
+unicore_classify_command_response_line() {
+  local command="${1-}"
+  local line="${2-}"
+  local lower="${line,,}"
+  local ack_target rest
+
+  if [[ "$lower" == *"response can't found device"* ||
+        "$lower" == *"response cant found device"* ||
+        "$lower" == *"unsupported"* ||
+        "$lower" == *"parsing failed"* ||
+        "$lower" == *"grammar error"* ]]; then
+    printf '%s\n' "unsupported"
+    return 0
+  fi
+
+  if [[ "$line" == \$command,* ]]; then
+    rest="${line#\$command,}"
+    ack_target="${rest%%,response:*}"
+    if [[ "$rest" == *",response: OK"* ]] &&
+       unicore_command_ack_target_matches "$command" "$ack_target"; then
+      printf '%s\n' "ok"
+      return 0
+    fi
+    printf '%s\n' "invalid_response"
+    return 0
+  fi
+
+  case "$line" in
+    "<OK"|"<OK "*|"<OK,"*)
+      printf '%s\n' "ok"
+      return 0
+      ;;
+  esac
+
+  if unicore_is_stream_data_line "$line"; then
+    printf '%s\n' "ignored_stream_data"
+  else
+    printf '%s\n' "invalid_response"
+  fi
+}
+
+unicore_is_stream_data_line() {
+  local line="${1-}"
+  local printable
+
+  printable="$(printf '%s' "$line" | LC_ALL=C tr -cd '\40-\176')"
+  case "$printable" in
+    \#BESTNAVA*|\#BESTNAVB*|\#PVTSLNA*|\#PVTSLNB*|\#RTKSTATUSA*|\#RTKSTATUSB*|\#RTCMSTATUSA*|\#RTCMSTATUSB*|\#BESTSATA*|\#BESTSATB*|\#SATSINFOA*|\#SATSINFOB*|\#AGCA*|\#AGCB*|\#HWSTATUSA*|\#HWSTATUSB*|\#JAMSTATUSA*|\#JAMSTATUSB*|\#FREQJAMSTATUSA*|\#FREQJAMSTATUSB*|\#OBSVMCMPA*|\#OBSVMCMPB*)
+      return 0
+      ;;
+    \$GPGGA*|\$GNGGA*|\$GPGSV*|\$GLGSV*|\$GAGSV*|\$GBGSV*|\$GNHPR*|\$GNHPR2*)
+      return 0
+      ;;
+  esac
+
+  if [ "$printable" != "$line" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
 unicore_log_syntax_for_message() {
   local message="${1:?unicore_log_syntax_for_message: missing message}"
 
   case "$message" in
-    GPGGA|PVTSLNA|PVTSLNB|BESTSATA|BESTSATB|SATSINFOA|SATSINFOB|AGCA|AGCB|HWSTATUSA|HWSTATUSB|JAMSTATUSA|JAMSTATUSB|FREQJAMSTATUSA|FREQJAMSTATUSB|GPGSV|GLGSV|GAGSV|GBGSV|OBSVMCMPA|OBSVMCMPB)
+    GPGGA|PVTSLNA|PVTSLNB|BESTSATA|BESTSATB|SATSINFOA|SATSINFOB|AGCA|AGCB|HWSTATUSA|HWSTATUSB|JAMSTATUSA|JAMSTATUSB|FREQJAMSTATUSA|FREQJAMSTATUSB|OBSVMCMPA|OBSVMCMPB)
       printf '%s\n' "nmea_log_ontime"
       ;;
-    BESTNAVA|BESTNAVB|RTKSTATUSA|RTKSTATUSB|GPHPR)
+    BESTNAVA|BESTNAVB|RTKSTATUSA|RTKSTATUSB|GPHPR|GPGSV)
       printf '%s\n' "unicore_direct_period"
       ;;
     RTCMSTATUSA|RTCMSTATUSB|GPHPR2)
@@ -607,12 +751,19 @@ send_serial_command() {
 
 collect_serial_output() {
   local rounds="${1:?collect_serial_output: missing rounds}"
+  local command="${2:-$UNICORE_LAST_SERIAL_COMMAND}"
   local line output=""
-  local i
+  local i status
 
   for i in $(seq 1 "$rounds"); do
     if IFS= read -r -t 0.15 -u 3 line; then
       output+="${line}"$'\n'
+      status="$(unicore_classify_command_response_line "$command" "$line")"
+      case "$status" in
+        ok|unsupported)
+          break
+          ;;
+      esac
     fi
   done
 
@@ -626,7 +777,7 @@ send_serial_command_with_response() {
   send_serial_command "$command"
   log "  -> $command"
   sleep 0.1
-  UNICORE_LAST_COMMAND_RESPONSE="$(collect_serial_output 6)"
+  UNICORE_LAST_COMMAND_RESPONSE="$(collect_serial_output 12 "$command")"
 }
 
 send_log_command_with_fallback() {
@@ -641,8 +792,8 @@ send_log_command_with_fallback() {
   if [ -z "$parsed" ]; then
     send_serial_command_with_response "$canonical_command"
     response="$UNICORE_LAST_COMMAND_RESPONSE"
-    status="$(unicore_classify_command_response "$response")"
-    preview="$(unicore_first_response_line "$response")"
+    status="$(unicore_classify_command_response "$response" "$canonical_command")"
+    preview="$(unicore_log_preview_for_status "$response" "$canonical_command" "$status")"
     [ -n "$preview" ] && log "  <- ${status}: ${preview}"
     return 0
   fi
@@ -658,15 +809,15 @@ send_log_command_with_fallback() {
     candidate="${variant#*$'\t'}"
     send_serial_command_with_response "$candidate"
     response="$UNICORE_LAST_COMMAND_RESPONSE"
-    status="$(unicore_classify_command_response "$response")"
-    preview="$(unicore_first_response_line "$response")"
+    status="$(unicore_classify_command_response "$response" "$candidate")"
+    preview="$(unicore_log_preview_for_status "$response" "$candidate" "$status")"
 
-    if [ "$status" = "unsupported" ]; then
+    if [ "$status" != "ok" ]; then
       if [ -n "$rejected" ]; then
         rejected+=" | "
       fi
       rejected+="$candidate"
-      log "  <- unsupported via ${label}${preview:+: ${preview}}"
+      log "  <- ${status} via ${label}${preview:+: ${preview}}"
       continue
     fi
 
@@ -674,9 +825,9 @@ send_log_command_with_fallback() {
     UNICORE_LOG_COMMAND_SYNTAX_BY_MESSAGE["$message"]="$label"
     UNICORE_REJECTED_LOG_COMMANDS["$message"]="$rejected"
     if [ "$candidate" != "$canonical_command" ]; then
-      log "  <- accepted ${message} via ${label}: ${candidate}${preview:+ | ${preview}}"
+      log "  <- ok accepted ${message} via ${label}: ${candidate}${preview:+ | ${preview}}"
     else
-      log "  <- accepted ${message} via ${label}${preview:+: ${preview}}"
+      log "  <- ok accepted ${message} via ${label}${preview:+: ${preview}}"
     fi
     return 0
   done
@@ -832,9 +983,6 @@ build_log_commands() {
     unicore_emit_paired_message_log "BESTSATA" "BESTSATB" "${UNICORE_SATELLITE_LOG_PERIOD}"
     unicore_emit_paired_message_log "SATSINFOA" "SATSINFOB" "${UNICORE_SATELLITE_LOG_PERIOD}"
     unicore_emit_ascii_message_log "GPGSV" "${UNICORE_SATELLITE_LOG_PERIOD}"
-    unicore_emit_ascii_message_log "GLGSV" "${UNICORE_SATELLITE_LOG_PERIOD}"
-    unicore_emit_ascii_message_log "GAGSV" "${UNICORE_SATELLITE_LOG_PERIOD}"
-    unicore_emit_ascii_message_log "GBGSV" "${UNICORE_SATELLITE_LOG_PERIOD}"
   fi
 
   if unicore_is_truthy "$UNICORE_ENABLE_RF"; then
@@ -915,8 +1063,8 @@ send_config_batch() {
 
     send_serial_command_with_response "$command"
     response="$UNICORE_LAST_COMMAND_RESPONSE"
-    status="$(unicore_classify_command_response "$response")"
-    preview="$(unicore_first_response_line "$response")"
+    status="$(unicore_classify_command_response "$response" "$command")"
+    preview="$(unicore_log_preview_for_status "$response" "$command" "$status")"
     [ -n "$preview" ] && log "  <- ${status}: ${preview}"
   done
 

@@ -373,6 +373,38 @@ assert_eq "all syntax rejected keeps no accepted command" "" "${UNICORE_ACCEPTED
 assert_contains "all syntax rejected remembers onchanged" "RTCMSTATUSA ONCHANGED" "${UNICORE_REJECTED_LOG_COMMANDS[RTCMSTATUSA]:-}"
 assert_contains "all syntax rejected remembers com_onchanged" "RTCMSTATUSA COM1 ONCHANGED" "${UNICORE_REJECTED_LOG_COMMANDS[RTCMSTATUSA]:-}"
 
+polluted_stream_response=$'\001\002#BESTNAVA,COM1,0,0,FINESTEERING,0,0;SOL_COMPUTED\n$GPGGA,123519,4807.038,N,01131.000,E,4,08,0.9,545.4,M,46.9,M,,*47'
+assert_eq "stream-only data is ignored" "ignored_stream_data" "$(unicore_classify_command_response "$polluted_stream_response" "BESTNAVA 0.2")"
+assert_eq "can't found device is unsupported" "unsupported" "$(unicore_classify_command_response "response can't found device" "BESTSATB 2")"
+assert_eq "command ack exact target is ok" "ok" "$(unicore_classify_command_response '$command,BESTNAVA 0.2,response: OK*' "BESTNAVA 0.2")"
+assert_eq "command ack prefix target is ok" "ok" "$(unicore_classify_command_response '$command,LOG GPGGA,response: OK*' "LOG GPGGA ONTIME 0.2")"
+assert_eq "wrong command ack is invalid" "invalid_response" "$(unicore_classify_command_response '$command,GPGSV 1,response: OK*' "BESTSATB 2")"
+
+reset_mocks
+MOCK_COMMAND_RESPONSES["GPGSV 1"]="$polluted_stream_response"
+MOCK_COMMAND_RESPONSES["GPGSV ONTIME 1"]="$polluted_stream_response"
+MOCK_COMMAND_RESPONSES["GPGSV COM1 1"]="$polluted_stream_response"
+MOCK_COMMAND_RESPONSES["GPGSV COM1 1"]="$polluted_stream_response"
+MOCK_COMMAND_RESPONSES["LOG GPGSV ONTIME 1"]="$polluted_stream_response"
+if send_log_command_with_fallback "GPGSV 1"; then
+  rc=0
+else
+  rc=$?
+fi
+assert_eq "polluted stream is not accepted rc" "1" "$rc"
+assert_eq "polluted stream does not cache accepted syntax" "" "${UNICORE_ACCEPTED_LOG_COMMANDS[GPGSV]:-}"
+assert_contains "polluted stream rejected command recorded" "GPGSV 1" "${UNICORE_REJECTED_LOG_COMMANDS[GPGSV]:-}"
+
+reset_mocks
+MOCK_COMMAND_RESPONSES["BESTSATB 2"]=$'\001\002#BESTNAVA,COM1,0,0,FINESTEERING,0,0;SOL_COMPUTED\n$command,BESTSATB 2,response: OK*'
+if send_log_command_with_fallback "BESTSATB 2"; then
+  rc=0
+else
+  rc=$?
+fi
+assert_eq "polluted stream before ack accepted rc" "0" "$rc"
+assert_eq "polluted stream before ack caches true ack" "BESTSATB 2" "${UNICORE_ACCEPTED_LOG_COMMANDS[BESTSATB]:-}"
+
 if [ "$failures" -ne 0 ]; then
   echo ""
   echo "$failures test(s) failed."
