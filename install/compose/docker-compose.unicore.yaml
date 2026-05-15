@@ -16,11 +16,12 @@
 #
 # The container's CMD (`/start_gps.sh`) is intentionally left as-is —
 # it reads gps_port / gps_baudrate / ntrip_* from /config/mowgli_robot.yaml
-# and runs `ros2 run mowgli_unicore_gnss um982_node` + `ros2 run
-# ntrip_client_node ntrip_client_node` directly. Do NOT override `command:`
-# here with a `ros2 launch mowgli_bringup ...` invocation: there is no
-# unicore launch file in mowgli_bringup, and the Unicore packages aren't
-# in the mowgli-ros2 image anyway.
+# and runs `ros2 run ${UNICORE_ROS_PACKAGE} ${UNICORE_ROS_EXECUTABLE}` +
+# `ros2 run ntrip_client_node ntrip_client_node` directly. Defaults are
+# unicore_gnss / unicore_node (see install/lib/env.sh). Do NOT override
+# `command:` here with a `ros2 launch mowgli_bringup ...` invocation:
+# there is no unicore launch file in mowgli_bringup, and the Unicore
+# packages aren't in the mowgli-ros2 image anyway.
 # -------------------------------------------------------------------------
 x-ros2-env: &ros2-env
   ROS_DOMAIN_ID: ${ROS_DOMAIN_ID}

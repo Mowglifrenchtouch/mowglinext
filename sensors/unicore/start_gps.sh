@@ -244,12 +244,15 @@ if is_truthy "$UNICORE_AUTO_CONFIGURE"; then
   fi
 fi
 
-echo "[start_gps.sh] Launching Unicore UM982 GNSS driver: port=${GPS_PORT} baud=${GPS_BAUD} profile=${UNICORE_PROFILE}"
+UNICORE_ROS_PACKAGE="${UNICORE_ROS_PACKAGE:-unicore_gnss}"
+UNICORE_ROS_EXECUTABLE="${UNICORE_ROS_EXECUTABLE:-unicore_node}"
+
+echo "[start_gps.sh] Launching Unicore GNSS driver: port=${GPS_PORT} baud=${GPS_BAUD} profile=${UNICORE_PROFILE} pkg=${UNICORE_ROS_PACKAGE} exec=${UNICORE_ROS_EXECUTABLE}"
 # diagnostics_topic = /diagnostics — the ROS2 standard aggregator topic
 # (matches gps_health_aggregator.py in the ublox path). The GUI's
 # Diagnostics panel reads from /diagnostics; namespacing under
 # /gps/diagnostics would hide the unicore status from the dashboard.
-ros2 run mowgli_unicore_gnss um982_node --ros-args \
+ros2 run "${UNICORE_ROS_PACKAGE}" "${UNICORE_ROS_EXECUTABLE}" --ros-args \
   -p "port:=${GPS_PORT}" \
   -p "baudrate:=${GPS_BAUD}" \
   -p "frame_id:=gps_link" \
