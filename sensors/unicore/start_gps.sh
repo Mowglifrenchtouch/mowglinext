@@ -81,7 +81,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-GPS_PORT=$(parse_yaml gps_port)
+GPS_PORT="${GPS_PORT:-$(parse_yaml gps_port)}"
 GPS_PORT="${GPS_PORT:-/dev/gps}"
 GPS_BAUD=$(parse_yaml gps_baudrate)
 GPS_BAUD="${GPS_BAUD:-921600}"

@@ -187,6 +187,7 @@ harness_set_preset() {
           GPS_CONNECTION="usb"
           GPS_PROTOCOL="UBX"
           GPS_UART_DEVICE=""
+          GPS_BY_ID="${GPS_BY_ID:-/dev/serial/by-id/usb-ublox-stub}"
           UBLOX_DEVICE_SERIAL_STRING="${UBLOX_DEVICE_SERIAL_STRING:-ublox-test-serial}"
         fi
         ;;
@@ -197,7 +198,11 @@ harness_set_preset() {
           nmea) GPS_PROTOCOL="NMEA"; unset GPS_BAUD ;;
         esac
         case "$conn" in
-          usb)  GPS_CONNECTION="usb";  GPS_UART_DEVICE="" ;;
+          usb)
+            GPS_CONNECTION="usb"
+            GPS_UART_DEVICE=""
+            GPS_BY_ID="${GPS_BY_ID:-/dev/serial/by-id/usb-gps-stub}"
+            ;;
           uart) GPS_CONNECTION="uart"; GPS_UART_DEVICE="${GPS_UART_DEVICE:-/dev/ttyAMA4}" ;;
         esac
         ;;

@@ -4,7 +4,7 @@
 #
 # The installer supports three direct GNSS backends:
 #   gps     — generic legacy GPS container       (docker-compose.gps.yml)
-#   ublox   — u-blox F9P (ublox_dgnss launch)    (docker-compose.ublox.yaml)
+#   ublox   — u-blox F9P via sensors/gps         (docker-compose.gps.yml)
 #   unicore — Unicore UM98x (unicore_gnss launch)(docker-compose.unicore.yaml)
 # Generic NMEA receivers are modeled as GNSS_BACKEND=gps with
 # GPS_PROTOCOL=NMEA, not as a separate GNSS backend.
@@ -78,6 +78,7 @@ harness_init "$repo"
 harness_set_preset gnss=gps gps=ubx-usb lidar=none tfluna=none
 harness_run >/dev/null 2>&1
 assert_eq "ubx/usb: GPS_CONNECTION=usb" "usb" "$(env_value "$repo" GPS_CONNECTION)"
+assert_eq "ubx/usb: GPS_PORT remains runtime symlink" "/dev/gps" "$(env_value "$repo" GPS_PORT)"
 # NOTE: env.sh::setup_env runs `: "${GPS_UART_DEVICE:=/dev/ttyAMA4}"` —
 # the := expansion replaces empty values with the default, so the .env
 # always has GPS_UART_DEVICE set. With GPS_CONNECTION=usb the compose
@@ -96,17 +97,14 @@ if harness_run; then pass "harness_run ublox"; else fail "harness_run ublox"; fi
 assert_eq "ublox: GNSS_BACKEND=ublox" "ublox" "$(env_value "$repo" GNSS_BACKEND)"
 assert_eq "ublox: GPS_CONNECTION forced to usb" "usb" "$(env_value "$repo" GPS_CONNECTION)"
 assert_eq "ublox: GPS_PROTOCOL forced to UBX" "UBX" "$(env_value "$repo" GPS_PROTOCOL)"
-assert_eq "ublox: dedicated serial string stored" "ublox-test-serial" "$(env_value "$repo" UBLOX_DEVICE_SERIAL_STRING)"
+assert_eq "ublox: GPS_PORT remains runtime symlink" "/dev/gps" "$(env_value "$repo" GPS_PORT)"
+assert_eq "ublox: selected USB identity stored" "/dev/serial/by-id/usb-ublox-stub" "$(env_value "$repo" GPS_BY_ID)"
 
-# Compose selection must include the ublox fragment and exclude the legacy gps fragment.
+# Compose selection routes ublox through the shared gps fragment.
 ublox_fragments=$(selected_fragments_in_current_run)
 case "$ublox_fragments" in
-  *docker-compose.ublox.yaml*) pass "ublox: ublox fragment present" ;;
-  *)                           fail "ublox: ublox fragment present" "got: $ublox_fragments" ;;
-esac
-case "$ublox_fragments" in
-  *docker-compose.gps.yml*) fail "ublox: NO legacy gps fragment" "legacy gps leaked when ublox selected" ;;
-  *)                        pass "ublox: NO legacy gps fragment" ;;
+  *docker-compose.gps.yml*) pass "ublox: gps fragment present" ;;
+  *)                        fail "ublox: gps fragment present" "got: $ublox_fragments" ;;
 esac
 
 # ── Unicore UM98x backend ──────────────────────────────────────────────────

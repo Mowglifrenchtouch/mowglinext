@@ -86,13 +86,7 @@ check_devices() {
     devices+=("${MAVROS_PORT:-/dev/mavros}:Pixhawk MAVROS serial")
   else
     devices+=("/dev/mowgli:Mowgli STM32 board")
-    # Prefer the by-id symlink for USB receivers — it's what the container
-    # uses via GPS_DEVICE_PATH and is always created by systemd-udev.
-    local gps_device="${GPS_PORT}"
-    if [[ "${GPS_CONNECTION:-}" == "usb" ]] && [[ -n "${GPS_BY_ID:-}" ]]; then
-      gps_device="${GPS_BY_ID}"
-    fi
-    devices+=("${gps_device}:GPS receiver")
+    devices+=("${GPS_PORT}:GPS receiver")
   fi
 
   if [[ "${LIDAR_ENABLED}" == "true" && "${LIDAR_TYPE}" != "none" ]]; then

@@ -124,12 +124,10 @@ configure_gps() {
     : "${GPS_DEBUG_PORT:=/dev/gps_debug}"
     : "${GPS_DEBUG_BAUD:=115200}"
 
-    # For USB connections, prefer the by-id symlink as GPS_PORT — it's always
-    # created by systemd-udev and is what start_gps.sh expects via
-    # GPS_DEVICE_PATH inside the container. /dev/gps would require an extra
-    # udev rule that doesn't fire on every distro.
+    # Runtime always uses the stable /dev/gps symlink. Keep the selected USB
+    # identity in GPS_BY_ID only; installer/udev materializes the symlink.
     if [[ "${GPS_CONNECTION}" == "usb" ]] && [[ -n "${GPS_BY_ID:-}" ]]; then
-      GPS_PORT="${GPS_BY_ID}"
+      GPS_PORT="/dev/gps"
     fi
 
     if [[ "${GNSS_BACKEND}" == "ublox" ]]; then
@@ -141,12 +139,11 @@ configure_gps() {
       GPS_CONNECTION="usb"
       GPS_PROTOCOL="UBX"
       # If an older .env still carries UBLOX_DEVICE_SERIAL_STRING pointing at a
-      # /dev/serial/by-id/... path (which is what the migration emitted), use
-      # it to populate GPS_PORT / GPS_BY_ID. Otherwise demand the canonical
-      # GPS_PORT / GPS_BY_ID like the unicore preset.
+      # /dev/serial/by-id/... path, use it to populate GPS_BY_ID only. Runtime
+      # still goes through /dev/gps.
       if [[ -z "${GPS_BY_ID:-}" && "${UBLOX_DEVICE_SERIAL_STRING:-}" =~ ^/dev/serial/by-id/ ]]; then
         GPS_BY_ID="${UBLOX_DEVICE_SERIAL_STRING}"
-        GPS_PORT="${UBLOX_DEVICE_SERIAL_STRING}"
+        GPS_PORT="/dev/gps"
       fi
       UBLOX_DEVICE_SERIAL_STRING=""
       if [[ -z "${GPS_BY_ID:-}" ]]; then
@@ -239,9 +236,8 @@ configure_gps() {
     : "${GPS_DEBUG_BAUD:=115200}"
 
     if [[ "${GNSS_BACKEND}" == "ublox" ]]; then
-      # ublox now uses the same sensors/gps serial-transport container as
-      # GNSS_BACKEND=gps + GPS_PROTOCOL=UBX over USB by-id (see
-      # compose_gnss_service_name and start_gps.sh:GPS_DEVICE_PATH).
+      # ublox now uses the same runtime /dev/gps contract as the other direct
+      # GNSS backends; the selected USB identity remains installer metadata.
       GPS_CONNECTION="usb"
       GPS_PROTOCOL="UBX"
       GPS_UART_DEVICE=""
@@ -253,7 +249,7 @@ configure_gps() {
       info "UART u-blox receivers should use GNSS_BACKEND=gps with GPS_PROTOCOL=UBX."
       pick_serial_by_id "${GPS_BY_ID:-}" || return 1
       GPS_BY_ID="$REPLY"
-      GPS_PORT="$GPS_BY_ID"
+      GPS_PORT="/dev/gps"
     else
       echo ""
       echo "$MSG_GPS_CONNECTION"
@@ -268,7 +264,7 @@ configure_gps() {
           GPS_UART_DEVICE=""
           pick_serial_by_id "${GPS_BY_ID:-}" || return 1
           GPS_BY_ID="$REPLY"
-          GPS_PORT="$GPS_BY_ID"
+          GPS_PORT="/dev/gps"
           ;;
         2)
           GPS_CONNECTION="uart"

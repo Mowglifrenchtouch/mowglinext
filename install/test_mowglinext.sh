@@ -263,8 +263,8 @@ HARDWARE_BACKEND=mowgli
 MAVROS_BY_ID=""
 udev_rules="$(build_dynamic_udev_rules)"
 case "$udev_rules" in
-  *'SYMLINK+="gps"'*) fail "udev by-id: dedicated ublox backend does not create /dev/gps symlink" "$udev_rules" ;;
-  *) pass "udev by-id: dedicated ublox backend does not create /dev/gps symlink" ;;
+  *'SYMLINK+="gps"'*) fail "udev by-id: no implicit u-blox GPS rule without GPS_BY_ID" "$udev_rules" ;;
+  *) pass "udev by-id: no implicit u-blox GPS rule without GPS_BY_ID" ;;
 esac
 
 GNSS_BACKEND=unicore
@@ -276,11 +276,93 @@ case "$udev_rules" in
 esac
 
 GPS_BY_ID="$SERIAL_BY_ID_DIR/usb-1a86_USB_Serial-if00-port0"
+udevadm() {
+  case "$1 $2 $3" in
+    "info --query=property --name=/tmp"*)
+      case "$3" in
+        --name="$SANDBOX/dev/ttyUSB0")
+          cat <<'PROPS'
+ID_VENDOR_ID=1a86
+ID_MODEL_ID=7523
+ID_SERIAL_SHORT=CH340-UNIQUE-01
+PROPS
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+export -f udevadm
 udev_rules="$(build_dynamic_udev_rules)"
 case "$udev_rules" in
-  *'KERNEL=="ttyUSB0", SYMLINK+="gps", MODE="0666"'*) pass "udev by-id: explicit Unicore GPS_BY_ID symlink rule" ;;
-  *) fail "udev by-id: explicit Unicore GPS_BY_ID symlink rule" "$udev_rules" ;;
+  *'ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ATTRS{serial}=="CH340-UNIQUE-01", SYMLINK+="gps", MODE="0666"'*) pass "udev by-id: explicit GPS_BY_ID rule includes unique serial selector" ;;
+  *) fail "udev by-id: explicit GPS_BY_ID rule includes unique serial selector" "$udev_rules" ;;
 esac
+case "$udev_rules" in
+  *'ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="gps", MODE="0666"'*) fail "udev by-id: GPS rule must not be generic VID/PID only" "$udev_rules" ;;
+  *) pass "udev by-id: GPS rule must not be generic VID/PID only" ;;
+esac
+
+udevadm() {
+  case "$1 $2 $3" in
+    "info --query=property --name=/tmp"*)
+      case "$3" in
+        --name="$SANDBOX/dev/ttyUSB0")
+          cat <<'PROPS'
+ID_VENDOR_ID=1a86
+ID_MODEL_ID=7523
+ID_PATH=platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0
+PROPS
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+export -f udevadm
+udev_rules="$(build_dynamic_udev_rules)"
+case "$udev_rules" in
+  *'ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", ENV{ID_PATH}=="platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0", SYMLINK+="gps", MODE="0666"'*) pass "udev by-id: GPS rule falls back to stable ID_PATH selector when serial is absent" ;;
+  *) fail "udev by-id: GPS rule falls back to stable ID_PATH selector when serial is absent" "$udev_rules" ;;
+esac
+
+udevadm() {
+  case "$1 $2 $3" in
+    "info --query=property --name=/tmp"*)
+      case "$3" in
+        --name="$SANDBOX/dev/ttyUSB0")
+          cat <<'PROPS'
+ID_VENDOR_ID=1a86
+ID_MODEL_ID=7523
+PROPS
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+export -f udevadm
+if udev_rules="$(build_dynamic_udev_rules 2>&1)"; then
+  fail "udev by-id: generic CH340 GPS rule rejected without unique selector" "$udev_rules"
+else
+  pass "udev by-id: generic CH340 GPS rule rejected without unique selector"
+fi
+unset -f udevadm
 
 GPS_CONNECTION=uart
 GPS_UART_DEVICE=/dev/ttyAMA4
@@ -478,10 +560,12 @@ GPS_CONNECTION=usb
 GPS_PROTOCOL=UBX
 GPS_BAUD=115200
 GPS_UART_DEVICE=
+GPS_BY_ID=/dev/serial/by-id/usb-ublox-stub
 UBLOX_DEVICE_SERIAL_STRING=ublox-test-serial
 GPS_DEBUG_ENABLED=false
 configure_gps >/dev/null 2>&1
-assert_eq "GPS preset mode: keeps dedicated ublox serial string" "ublox-test-serial" "$UBLOX_DEVICE_SERIAL_STRING"
+assert_eq "GPS preset mode: runtime GPS port stays symlink" "/dev/gps" "$GPS_PORT"
+assert_eq "GPS preset mode: keeps selected USB identity" "/dev/serial/by-id/usb-ublox-stub" "$GPS_BY_ID"
 pass "GPS preset mode: no interactive prompts"
 
 # LiDAR with preset — should NOT prompt

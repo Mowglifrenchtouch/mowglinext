@@ -63,6 +63,58 @@ emit_by_id_udev_rule() {
   fi
 }
 
+emit_strict_gps_by_id_udev_rule() {
+  local by_id_path="$1"
+  local resolved kernel vendor product serial id_path id_path_tag line key value
+
+  [ -L "$by_id_path" ] || return 1
+  resolved="$(readlink -f "$by_id_path")"
+  kernel="$(basename "$resolved")"
+  [ -n "$kernel" ] || return 1
+
+  vendor=""
+  product=""
+  serial=""
+  id_path=""
+  id_path_tag=""
+
+  if ! command -v udevadm >/dev/null 2>&1 || [ ! -e "$resolved" ]; then
+    error "Selected GPS device $by_id_path needs udevadm properties to build a unique /dev/gps rule. Refusing generic fallback."
+    return 1
+  fi
+
+  while IFS='=' read -r key value; do
+    case "$key" in
+      ID_VENDOR_ID)  vendor="$value" ;;
+      ID_MODEL_ID)   product="$value" ;;
+      ID_SERIAL_SHORT) serial="$value" ;;
+      ID_PATH)       id_path="$value" ;;
+      ID_PATH_TAG)   id_path_tag="$value" ;;
+    esac
+  done < <(udevadm info --query=property --name="$resolved" 2>/dev/null)
+
+  if [ -z "$vendor" ] || [ -z "$product" ]; then
+    error "Selected GPS device $by_id_path is missing idVendor/idProduct in udevadm output. Refusing to generate /dev/gps rule."
+    return 1
+  fi
+
+  echo "# gps from $by_id_path"
+  line="SUBSYSTEM==\"tty\", ATTRS{idVendor}==\"${vendor}\", ATTRS{idProduct}==\"${product}\""
+  if [ -n "$serial" ]; then
+    line="${line}, ATTRS{serial}==\"${serial}\""
+  elif [ -n "$id_path" ]; then
+    line="${line}, ENV{ID_PATH}==\"${id_path}\""
+  elif [ -n "$id_path_tag" ]; then
+    line="${line}, ENV{ID_PATH_TAG}==\"${id_path_tag}\""
+  else
+    error "Selected GPS device $by_id_path exposes only generic VID/PID ${vendor}:${product} with no serial or stable path selector. Refusing to generate non-unique /dev/gps rule."
+    return 1
+  fi
+
+  line="${line}, SYMLINK+=\"gps\", MODE=\"0666\""
+  echo "$line"
+}
+
 build_static_udev_rules() {
   cat <<'EOF'
 # =========================================================
@@ -117,35 +169,13 @@ build_dynamic_udev_rules() {
   fi
 
   # GPS principal
-  # The /dev/gps symlink is a *convenience* for manual debugging — the
-  # sensors/gps container talks to the F9P via the /dev/serial/by-id/...
-  # path passed in GPS_DEVICE_PATH (always created by systemd-udev), so
-  # the absence of this rule no longer breaks the container.
+  # Runtime expects /dev/gps only. Create it from the installer-selected
+  # source device, whether that source was a USB by-id path or a UART tty.
   if [ "$gnss_backend" != "disabled" ]; then
     if [ "${GPS_CONNECTION:-usb}" = "uart" ] && [ -n "${GPS_UART_DEVICE:-}" ]; then
       echo "KERNEL==\"$(basename "$GPS_UART_DEVICE")\", SYMLINK+=\"gps\", MODE=\"0666\""
     elif [ -n "${GPS_BY_ID:-}" ] && [ -e "${GPS_BY_ID}" ]; then
-      emit_by_id_udev_rule "$GPS_BY_ID" "gps"
-    elif [ "${HARDWARE_BACKEND:-mowgli}" != "mavros" ]; then
-      case "$gnss_backend" in
-        gps|ublox)
-          if [[ "$gps_protocol" != "NMEA" ]]; then
-            by_id_path="$(find_serial_by_id "*u-blox*" "*ublox*" || true)"
-          else
-            by_id_path=""
-          fi
-          ;;
-        unicore)
-          by_id_path=""
-          ;;
-        *)
-          by_id_path=""
-          ;;
-      esac
-
-      if [ -n "$by_id_path" ]; then
-        emit_by_id_udev_rule "$by_id_path" "gps"
-      fi
+      emit_strict_gps_by_id_udev_rule "$GPS_BY_ID" || return 1
     fi
   fi
 
@@ -178,11 +208,14 @@ install_udev_rules() {
   local tmpfile
   tmpfile="$(mktemp)"
 
-  {
+  if ! {
     build_static_udev_rules
     echo ""
     build_dynamic_udev_rules
-  } > "$tmpfile"
+  } > "$tmpfile"; then
+    rm -f "$tmpfile"
+    return 1
+  fi
 
   local changed=false
 
@@ -222,10 +255,10 @@ install_udev_rules() {
     if [ ! -e "${GPS_BY_ID}" ]; then
       warn "GPS by-id device ${GPS_BY_ID} does not exist"
     else
-      # /dev/gps udev rule is now optional — start_gps.sh reads the by-id
-      # path directly via GPS_DEVICE_PATH. Just confirm GPS_PORT resolves.
       info "GPS device: ${GPS_BY_ID} -> $(readlink -f "${GPS_BY_ID}")"
-      if [ -e "${GPS_PORT:-/dev/gps}" ] && [ "${GPS_PORT:-/dev/gps}" != "${GPS_BY_ID}" ]; then
+      if [ ! -e "${GPS_PORT:-/dev/gps}" ]; then
+        warn "GPS symlink ${GPS_PORT:-/dev/gps} not created — selected source device is ${GPS_BY_ID}"
+      else
         info "GPS symlink: ${GPS_PORT:-/dev/gps} -> $(readlink -f "${GPS_PORT:-/dev/gps}")"
       fi
     fi

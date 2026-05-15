@@ -23,14 +23,11 @@ parse_yaml() {
   grep -E "^\s+${1}:" "$CONFIG" | head -1 | sed 's/.*:\s*//' | tr -d '"' | tr -d "'"
 }
 
-# Compose env wins over /config/mowgli_robot.yaml. The installer writes
-# GPS_DEVICE_PATH / GPS_PROTOCOL / GPS_BAUD into docker/.env (see
-# install/lib/env.sh) and the compose fragments forward them as container
-# env vars; the YAML fallback keeps interactive `start_gps.sh` runs working
-# inside a shelled-in container where only mowgli_robot.yaml is set.
+# Compose env wins over /config/mowgli_robot.yaml. Runtime uses only the
+# stable /dev/gps symlink exposed through GPS_PORT.
 GPS_PROTOCOL="${GPS_PROTOCOL:-$(parse_yaml gps_protocol)}"
 GPS_PROTOCOL="${GPS_PROTOCOL:-UBX}"
-GPS_PORT="${GPS_DEVICE_PATH:-$(parse_yaml gps_port)}"
+GPS_PORT="${GPS_PORT:-$(parse_yaml gps_port)}"
 GPS_PORT="${GPS_PORT:-/dev/gps}"
 # gps_baudrate is the runtime baud for the main GNSS receiver.
 GPS_BAUD="${GPS_BAUD:-$(parse_yaml gps_baudrate)}"
@@ -85,11 +82,6 @@ else
   TRANSPORT="${TRANSPORT:-usb}"
 
   if [ "$TRANSPORT" = "serial" ]; then
-    # GPS_PORT is the host-side path the installer chose — usually a
-    # /dev/serial/by-id/... symlink (always created by systemd-udev,
-    # regardless of /etc/udev/rules.d/50-mowgli.rules). We override the
-    # baked-in DEVICE_PATH from /ublox_dgnss.yaml via --param so we don't
-    # need a /dev/gps udev symlink at all.
     DEVICE_PATH="$GPS_PORT"
     echo "[start_gps.sh] Transport=serial, device=$DEVICE_PATH"
 
@@ -116,17 +108,14 @@ else
       done
     fi
 
-    # Wait for the device path to appear (up to 5 s)
+    # Wait for the runtime symlink to appear (up to 5 s)
     for i in $(seq 1 50); do
       [ -e "$DEVICE_PATH" ] && break
       sleep 0.1
     done
-    # Resolve symlinks (e.g. /dev/serial/by-id/...) to a real char dev.
     REAL_DEVICE="$(readlink -f "$DEVICE_PATH" 2>/dev/null || echo "$DEVICE_PATH")"
     if [ ! -c "$REAL_DEVICE" ]; then
-      echo "[start_gps.sh] ERROR: $DEVICE_PATH (-> $REAL_DEVICE) did not appear after 5s"
-      echo "[start_gps.sh] Available serial-by-id entries:"
-      ls -l /dev/serial/by-id/ 2>/dev/null || echo "  (none)"
+      echo "[start_gps.sh] ERROR: missing /dev/gps symlink: $DEVICE_PATH (-> $REAL_DEVICE)"
       exit 1
     fi
   else

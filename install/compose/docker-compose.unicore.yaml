@@ -43,6 +43,7 @@ services:
       <<: *ros2-env
 
       HARDWARE_BACKEND: ${HARDWARE_BACKEND}
+      GPS_PORT: ${GPS_PORT:-/dev/gps}
 
       UNICORE_TARGET_BAUD: ${UNICORE_TARGET_BAUD}
       UNICORE_PROFILE: ${UNICORE_PROFILE}
