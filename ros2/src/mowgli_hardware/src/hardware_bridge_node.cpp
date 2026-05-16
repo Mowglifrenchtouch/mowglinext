@@ -1312,18 +1312,71 @@ private:
       send_high_level_state();
     }
 
-    // Motor deadband boost: at low |ω| with no linear motion, each wheel
-    // gets PWM ≈ |ω|·L/2·PWM_PER_MPS. With L=0.325 and PWM_PER_MPS=300,
-    // |ω|=0.5 rad/s → PWM 24, well below the firmware deadband (~PWM 40)
-    // → motors buzz and the robot doesn't rotate. Boost sub-threshold pure
-    // rotations to MIN_ROT_VEL so the wheels actually engage. Forward
-    // motion supplies its own PWM via vx, so we only boost when the
-    // robot is essentially stationary in linear.
+    // Motor deadband boost via PWM-style pulse modulation. At low |ω|
+    // with no linear motion, each wheel gets PWM ≈ |ω|·L/2·PWM_PER_MPS.
+    // With L=0.325 and PWM_PER_MPS=300, |ω|=0.5 rad/s → PWM 24, below
+    // the firmware ~PWM 40 deadband → motors buzz instead of rotating.
+    //
+    // The previous fix simply floored every sub-threshold |ω| to
+    // ±kMinRotVel. That solved the buzz, but every "small correction"
+    // FTC sent (e.g. ±0.2 rad/s during PRE_ROTATE) became a full-rate
+    // burst that lasted as long as the command did → 2.3× rotation
+    // overshoot relative to the FTC-intended angle, and FTC oscillated
+    // left-right-left-right trying to converge on the target yaw.
+    //
+    // Pulse modulation instead: each cmd_vel tick we accumulate
+    //   ratio = |wz| / kMinRotVel  ("ticks of burst owed at kMinRotVel")
+    // and once that reaches kPulseBurstTicks we fire kPulseBurstTicks
+    // consecutive cmd_vel ticks at ±kMinRotVel before going idle again.
+    // The robot rotates in discrete ≈7° chunks whose long-term average
+    // is the originally requested |wz|. A single 50 ms tick at
+    // ±kMinRotVel is absorbed by motor stiction → the burst length is
+    // what makes the wheels actually move.
+    //
+    // Forward motion (|vx| ≥ threshold) still passes through unchanged
+    // — vx supplies enough PWM to defeat the deadband.
     constexpr double kMinRotVel = 0.85;  // rad/s, ≈ wheel 0.14 m/s
     constexpr double kVxStationaryThreshold = 0.05;
     if (std::abs(vx) < kVxStationaryThreshold && wz != 0.0 && std::abs(wz) < kMinRotVel)
     {
-      wz = std::copysign(kMinRotVel, wz);
+      const int sign = (wz > 0.0) ? 1 : -1;
+      if (rot_pulse_last_sign_ != 0 && rot_pulse_last_sign_ != sign)
+      {
+        // Direction flipped: drain the bucket so we don't immediately
+        // shoot a burst in the new direction off a previous accumulation.
+        rot_pulse_accumulator_ = 0.0;
+        rot_pulse_burst_remaining_ = 0;
+      }
+      rot_pulse_last_sign_ = sign;
+      rot_pulse_accumulator_ += std::abs(wz) / kMinRotVel;
+
+      if (rot_pulse_burst_remaining_ > 0)
+      {
+        // Continue the in-flight burst.
+        wz = static_cast<double>(sign) * kMinRotVel;
+        --rot_pulse_burst_remaining_;
+      }
+      else if (rot_pulse_accumulator_ >= static_cast<double>(kPulseBurstTicks))
+      {
+        // Start a new burst. The current tick counts as the first burst
+        // tick, the remaining (N-1) are fired on the next cmd_vel ticks.
+        wz = static_cast<double>(sign) * kMinRotVel;
+        rot_pulse_burst_remaining_ = kPulseBurstTicks - 1;
+        rot_pulse_accumulator_ -= static_cast<double>(kPulseBurstTicks);
+      }
+      else
+      {
+        wz = 0.0;
+      }
+    }
+    else
+    {
+      // Not in sub-deadband regime (forward motion, |ω|≥threshold, or
+      // pure stop). Drop accumulator + burst so the next time we enter
+      // sub-deadband, we don't fire a stale stored burst.
+      rot_pulse_accumulator_ = 0.0;
+      rot_pulse_burst_remaining_ = 0;
+      rot_pulse_last_sign_ = 0;
     }
 
     LlCmdVel pkt{};
@@ -1436,6 +1489,27 @@ private:
   bool is_charging_{false};
   uint8_t current_mode_{0};
   uint8_t gps_quality_{0};
+
+  // Pulse-width-modulated sub-deadband angular boost (on_cmd_vel). When
+  // a fine ω command (< kMinRotVel) arrives, fire a multi-tick burst at
+  // ±kMinRotVel intermittently so the time-average matches the
+  // requested rate — instead of FLOORING every small request to
+  // ±kMinRotVel like the original boost did, which made FTC's PRE_ROTATE
+  // overshoot by ~2.3× and oscillate left/right around the target yaw.
+  //
+  // Bursts must be ≥ ~150 ms to overcome motor stiction; a single
+  // cmd_vel tick (50 ms at 20 Hz) is absorbed by motor inertia and the
+  // wheels just twitch without rotating. kPulseBurstTicks therefore
+  // fires N consecutive cmd_vel ticks at ±kMinRotVel once the
+  // accumulator crosses N, giving a deterministic per-burst rotation of
+  // N × kMinRotVel × dt_cmd_vel radians (≈ 7° per burst at 20 Hz).
+  //
+  // Direction change drains the accumulator so a flip doesn't shoot a
+  // stale burst the wrong way.
+  static constexpr int kPulseBurstTicks = 3;
+  double rot_pulse_accumulator_{0.0};
+  int rot_pulse_burst_remaining_{0};
+  int rot_pulse_last_sign_{0};
 
   // Dock heading anchor: on is_charging false→true transition, publish
   // dock_heading with wide σ=π for a short window so dock_yaw_to_set_pose
