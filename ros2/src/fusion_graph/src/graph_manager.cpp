@@ -122,6 +122,12 @@ void GraphManager::AddGyroDelta(double wz, double dt)
     return;
   std::lock_guard<std::mutex> lock(mu_);
   accum_.dtheta_gyro += wz * dt;
+  // Track the running maximum so the stationary multi-source gate
+  // can distinguish "wheels still + robot truly still" (small gyro)
+  // from "wheels still + robot externally rotated" (large gyro).
+  const double abs_wz = std::abs(wz);
+  if (abs_wz > accum_.max_abs_gyro_rad_per_s)
+    accum_.max_abs_gyro_rad_per_s = abs_wz;
 }
 
 void GraphManager::QueueGnss(double x, double y, double sigma_xy, bool robust)
@@ -258,10 +264,19 @@ TickOutput GraphManager::CreateNodeLocked(double now_s)
       std::abs(accum_.dx) < params_.stationary_thresh_xy_m &&
       std::abs(accum_.dy) < params_.stationary_thresh_xy_m &&
       std::abs(accum_.dtheta_wheel) < params_.stationary_thresh_theta;
+  // Multi-source confirmation: if the wheel claims stationary but the
+  // gyro reports a rotation rate above the residual-bias floor, the
+  // robot is being externally rotated (hand-pushed off the dock,
+  // lifted while spinning) and the encoders cannot see it because
+  // they're free in mid-air. Don't snap dθ to 0 in that case — fall
+  // through to the gyro path so yaw still tracks reality.
+  const bool gyro_disagrees =
+      accum_.max_abs_gyro_rad_per_s > params_.stationary_gyro_thresh_rad_per_s;
+  const bool truly_stationary = wheel_stationary && !gyro_disagrees;
 
   double dtheta;
   double sigma_theta;
-  if (wheel_stationary)
+  if (truly_stationary)
   {
     dtheta = 0.0;
     sigma_theta = params_.stationary_sigma_theta;
@@ -270,6 +285,11 @@ TickOutput GraphManager::CreateNodeLocked(double now_s)
   {
     dtheta = accum_.dtheta_gyro;
     sigma_theta = params_.gyro_sigma_theta;
+    // Stat: count cases where wheel said stationary but the gyro
+    // overrode. Useful operational signal — if it spikes when the
+    // robot is parked, the gyro threshold may be too tight.
+    if (wheel_stationary && gyro_disagrees)
+      ++stats_hand_push_;
   }
   else
   {
@@ -424,7 +444,52 @@ GraphStats GraphManager::Stats() const
   s.total_nodes = next_index_;
   s.scans_attached = scans_.size();
   s.loop_closures = loop_closures_added_;
+  s.gps_rejects_wrongfix = stats_gps_rejects_wrongfix_;
+  s.icp_rejects_rmse = stats_icp_rejects_rmse_;
+  s.icp_rejects_inliers = stats_icp_rejects_inliers_;
+  s.icp_rejects_sanity = stats_icp_rejects_sanity_;
+  s.icp_rejects_divergence = stats_icp_rejects_divergence_;
+  s.stationary_hand_push = stats_hand_push_;
   return s;
+}
+
+void GraphManager::PeekAccumulator(double& dx,
+                                   double& dy,
+                                   double& dtheta_gyro,
+                                   double& dtheta_wheel) const
+{
+  std::lock_guard<std::mutex> lock(mu_);
+  dx = accum_.dx;
+  dy = accum_.dy;
+  dtheta_gyro = accum_.dtheta_gyro;
+  dtheta_wheel = accum_.dtheta_wheel;
+}
+
+void GraphManager::RecordGpsRejectWrongFix()
+{
+  std::lock_guard<std::mutex> lock(mu_);
+  ++stats_gps_rejects_wrongfix_;
+}
+
+void GraphManager::RecordIcpRejectRmse()
+{
+  std::lock_guard<std::mutex> lock(mu_);
+  ++stats_icp_rejects_rmse_;
+}
+void GraphManager::RecordIcpRejectInliers()
+{
+  std::lock_guard<std::mutex> lock(mu_);
+  ++stats_icp_rejects_inliers_;
+}
+void GraphManager::RecordIcpRejectSanity()
+{
+  std::lock_guard<std::mutex> lock(mu_);
+  ++stats_icp_rejects_sanity_;
+}
+void GraphManager::RecordIcpRejectDivergence()
+{
+  std::lock_guard<std::mutex> lock(mu_);
+  ++stats_icp_rejects_divergence_;
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -62,6 +62,39 @@ fusion_graph_node:
     pivot_gate_dtheta_rad: 0.012
     pivot_wheel_sigma_x: 0.5
 
+    # ── Stationary multi-source gate ───────────────────────────────────
+    # If the wheel says we're stationary but |gyro_z| stays above this
+    # threshold, the robot is being externally rotated (hand-pushed off
+    # the dock, lifted while spinning) and the encoders don't see it.
+    # Skip the dθ=0 snap in that case. 0.10 rad/s ≈ 5.7°/s sits above
+    # the typical post-cal gyro residual (~0.02-0.03 rad/s) and below
+    # any meaningful manual rotation.
+    stationary_gyro_thresh_rad_per_s: 0.10
+
+    # ── RTK wrong-fix detection ───────────────────────────────────────
+    # F9P occasionally re-solves carrier-phase ambiguity on a different
+    # integer set, jumping the reported position by a few centimetres
+    # while still flagging GBAS_FIX with sub-cm σ. When the GPS jump
+    # exceeds rtk_wrongfix_max_jump_m AND the wheel odometry says the
+    # chassis moved less than rtk_wrongfix_max_wheel_m between samples,
+    # drop the sample (see GraphStats.gps_rejects_wrongfix). 50 mm /
+    # 20 mm picked to clear measured RTK-Fixed σ (~1 cm on this rig,
+    # 2026-05-17) while catching ≥3 cm wrong-fix jumps.
+    rtk_wrongfix_max_jump_m: 0.05
+    rtk_wrongfix_max_wheel_m: 0.02
+
+    # ── ICP scan-match guard rails ─────────────────────────────────────
+    # Applied to every scan_matcher_->Match result before queueing it
+    # as a graph factor. See fusion_graph_node.hpp comments for the
+    # physical rationale. Tune up (relax) if scan_matches_fail spikes
+    # on otherwise-OK outdoor matches; tune down (tighten) if degenerate
+    # matches corrupt iSAM2 trajectory.
+    icp_max_rmse_m: 0.10
+    icp_max_delta_xy_m: 0.30
+    icp_max_delta_theta_rad: 0.50
+    icp_max_divergence_xy_m: 0.15
+    icp_max_divergence_theta_rad: 0.35
+
     # ── GPS unary noise floor ──────────────────────────────────────────
     # Below this sigma, NavSatFix.covariance is treated as unrealistic
     # and clamped. RTK-Fixed reports σ ~3 mm; below that is numerical

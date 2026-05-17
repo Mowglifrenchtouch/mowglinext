@@ -131,6 +131,48 @@ struct GraphParams
   // 10 Hz (gate fires above ~0.12 rad/s).
   double pivot_gate_dtheta_rad = 0.012;  // rad per tick
   double pivot_wheel_sigma_x = 0.5;  // m — inflated sigma during pivot
+
+  // Stationary multi-source gate. The wheel-only gate (above) can be
+  // tricked by encoders that report no motion while the robot is
+  // hand-pushed / lifted — wheels free in mid-air read 0 ticks even
+  // while base_link rotates. Cross-check against IMU gyro magnitude:
+  // when wheel says stationary but |gyro_z| > stationary_gyro_thresh
+  // (i.e. the robot is rotating despite still wheels), DON'T snap
+  // dtheta to 0 — fall back to the gyro between-factor instead.
+  //
+  // 0.10 rad/s ≈ 5.7°/s sits comfortably above the live gyro residual
+  // bias (~0.02-0.03 rad/s post-calibration drift) and below any
+  // meaningful manual rotation (~0.5 rad/s is the slowest a human
+  // intuitively pushes a robot). Tune up if false negatives appear
+  // (robot rotated but treated as stationary); down if encoder noise
+  // produces residual gyro samples on a truly parked robot.
+  double stationary_gyro_thresh_rad_per_s = 0.10;
+
+  // ICP scan-match quality gates. Result is dropped if any of these
+  // fail. Defaults are conservative — drop a few good matches in the
+  // sparse-outdoor edge case rather than absorb a degenerate one,
+  // because a single bad ICP delta corrupts iSAM2 trajectory for
+  // many subsequent nodes.
+  // icp_max_rmse_m: maximum acceptable RMS error over inliers (m).
+  //   At our 50 Hz cadence with the 0.10 default, scans need ~3-10 cm
+  //   of consistent matched-pair noise to be accepted — well within
+  //   LiDAR distance accuracy on dock/tree/chassis features.
+  // icp_max_delta_xy_m: per-node ICP delta (m) above which we treat
+  //   the match as unphysical. At 50 Hz a 0.3 m delta implies ≥15 m/s
+  //   robot velocity — impossible on a mower.
+  // icp_max_delta_theta_rad: same idea, on rotation. 0.5 rad/tick at
+  //   50 Hz = 25 rad/s, again physically impossible.
+  // icp_max_divergence_xy_m / icp_max_divergence_theta_rad: maximum
+  //   Mahalanobis-ish deviation of ICP result from its initial guess.
+  //   When wheel+gyro init is good (per ICP init upgrade in same PR),
+  //   ICP should refine it by mm — large divergences signal degenerate
+  //   scenery (symmetric haie / pure-grass fields where any rotation
+  //   has comparable score).
+  double icp_max_rmse_m = 0.10;
+  double icp_max_delta_xy_m = 0.30;
+  double icp_max_delta_theta_rad = 0.50;
+  double icp_max_divergence_xy_m = 0.15;
+  double icp_max_divergence_theta_rad = 0.35;
 };
 
 // What goes out to the publisher every tick.
@@ -148,6 +190,16 @@ struct GraphStats
   uint64_t total_nodes = 0;  // # nodes created since boot
   uint64_t scans_attached = 0;  // # nodes with a scan
   uint64_t loop_closures = 0;  // # AddLoopClosure successes
+
+  // Health counters (incremented by graph_manager; reset to 0 only on
+  // process restart). Each counter buckets a specific rejection cause
+  // so the diagnostics topic can show what's actually failing.
+  uint64_t gps_rejects_wrongfix = 0;  // jump in /fix > thresh with stationary wheel
+  uint64_t icp_rejects_rmse = 0;
+  uint64_t icp_rejects_inliers = 0;  // ScanMatcher returned ok=false (min_inliers)
+  uint64_t icp_rejects_sanity = 0;   // unphysical delta magnitude
+  uint64_t icp_rejects_divergence = 0;  // result far from initial guess
+  uint64_t stationary_hand_push = 0;  // wheel stationary but gyro disagrees
 };
 
 class GraphManager
@@ -208,6 +260,27 @@ public:
   // Read-only accessors (snapshot of current state).
   std::optional<TickOutput> LatestSnapshot() const;
   GraphStats Stats() const;
+
+  // Peek at the current per-tick wheel+gyro accumulator without
+  // consuming it (Tick() resets the accumulator atomically). Used by
+  // the ICP step to seed scan-matching with a non-identity initial
+  // guess: composing wheel translation + gyro rotation since the
+  // previous node creates a far better start than Pose2() for ICP's
+  // brute-force NN search — especially under fast pivots where the
+  // identity-init guess sends ICP looking 30°+ off true rotation.
+  void PeekAccumulator(double& dx,
+                       double& dy,
+                       double& dtheta_gyro,
+                       double& dtheta_wheel) const;
+
+  // Health counters. fusion_graph_node calls these from its OnGnss
+  // (wrong-fix detection) and OnTimer (ICP guard rails) paths. Each
+  // call is mu_-locked and atomic.
+  void RecordGpsRejectWrongFix();
+  void RecordIcpRejectRmse();
+  void RecordIcpRejectInliers();
+  void RecordIcpRejectSanity();
+  void RecordIcpRejectDivergence();
 
   // ── Visualization snapshots ─────────────────────────────────────
   // Optimized 2D pose for every variable currently in the iSAM2
@@ -320,6 +393,12 @@ private:
     double dtheta_wheel = 0.0;
     double dtheta_gyro = 0.0;
     double dt_total = 0.0;
+    // Largest |gyro_z| (rad/s) seen this tick window. Used by the
+    // stationary multi-source gate: when wheel says stationary but
+    // this maximum exceeds stationary_gyro_thresh_rad_per_s, the
+    // robot is being externally rotated (hand-pushed / lifted off
+    // the ground) so don't snap dθ to 0.
+    double max_abs_gyro_rad_per_s = 0.0;
     void Reset()
     {
       *this = Accumulator{};
@@ -389,6 +468,16 @@ private:
   // the diagnostics + odom outputs.
   int ticks_since_cov_ = 0;
   std::vector<std::pair<uint64_t, uint64_t>> loop_closure_edges_;
+
+  // Health counters surfaced via Stats(). All bumps go through the
+  // Record*() mutators below so mu_ wraps them — Stats() makes a
+  // single locked copy.
+  uint64_t stats_gps_rejects_wrongfix_ = 0;
+  uint64_t stats_icp_rejects_rmse_ = 0;
+  uint64_t stats_icp_rejects_inliers_ = 0;
+  uint64_t stats_icp_rejects_sanity_ = 0;
+  uint64_t stats_icp_rejects_divergence_ = 0;
+  uint64_t stats_hand_push_ = 0;
 
   // ── Async-rebase pipeline ───────────────────────────────────────
   // RebaseISAM2 rebuilds the iSAM2 Bayes tree from scratch with one

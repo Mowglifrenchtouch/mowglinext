@@ -76,6 +76,14 @@ FusionGraphNode::FusionGraphNode(const rclcpp::NodeOptions& opts)
       declare_parameter<double>("pivot_gate_dtheta_rad", 0.012);
   gp.pivot_wheel_sigma_x =
       declare_parameter<double>("pivot_wheel_sigma_x", 0.5);
+  gp.stationary_gyro_thresh_rad_per_s =
+      declare_parameter<double>("stationary_gyro_thresh_rad_per_s", 0.10);
+
+  // RTK wrong-fix detection (handled in OnGnss, not in graph_manager).
+  rtk_wrongfix_max_jump_m_ =
+      declare_parameter<double>("rtk_wrongfix_max_jump_m", 0.05);
+  rtk_wrongfix_max_wheel_m_ =
+      declare_parameter<double>("rtk_wrongfix_max_wheel_m", 0.02);
 
   datum_lat_ = declare_parameter<double>("datum_lat", 0.0);
   datum_lon_ = declare_parameter<double>("datum_lon", 0.0);
@@ -103,6 +111,13 @@ FusionGraphNode::FusionGraphNode(const rclcpp::NodeOptions& opts)
     sp.sigma_xy_base = declare_parameter<double>("icp_sigma_xy_base", 0.02);
     sp.sigma_theta_base = declare_parameter<double>("icp_sigma_theta_base", 0.005);
     scan_matcher_ = std::make_unique<ScanMatcher>(sp);
+
+    // Per-tick ICP guard rails (see fusion_graph_node.hpp comments).
+    icp_max_rmse_m_ = declare_parameter<double>("icp_max_rmse_m", 0.10);
+    icp_max_delta_xy_m_ = declare_parameter<double>("icp_max_delta_xy_m", 0.30);
+    icp_max_delta_theta_rad_ = declare_parameter<double>("icp_max_delta_theta_rad", 0.50);
+    icp_max_divergence_xy_m_ = declare_parameter<double>("icp_max_divergence_xy_m", 0.15);
+    icp_max_divergence_theta_rad_ = declare_parameter<double>("icp_max_divergence_theta_rad", 0.35);
   }
 
   // ── Magnetometer (off by default) ───────────────────────────────
@@ -410,6 +425,23 @@ FusionGraphNode::FusionGraphNode(const rclcpp::NodeOptions& opts)
                           add("scans_received", std::to_string(scans_received_));
                           add("scan_matches_ok", std::to_string(scan_matches_ok_));
                           add("scan_matches_fail", std::to_string(scan_matches_fail_));
+                          // Robustness-pass health counters. Each is a
+                          // cumulative count since process start; the
+                          // session monitor diffs consecutive samples
+                          // to get a rate. A spike on any of these is
+                          // worth surfacing — see PR notes.
+                          add("gps_rejects_wrongfix",
+                              std::to_string(stats.gps_rejects_wrongfix));
+                          add("icp_rejects_rmse",
+                              std::to_string(stats.icp_rejects_rmse));
+                          add("icp_rejects_inliers",
+                              std::to_string(stats.icp_rejects_inliers));
+                          add("icp_rejects_sanity",
+                              std::to_string(stats.icp_rejects_sanity));
+                          add("icp_rejects_divergence",
+                              std::to_string(stats.icp_rejects_divergence));
+                          add("stationary_hand_push",
+                              std::to_string(stats.stationary_hand_push));
                           if (snap)
                           {
                             char buf[64];
@@ -541,6 +573,12 @@ void FusionGraphNode::OnWheelOdom(nav_msgs::msg::Odometry::ConstSharedPtr msg)
                             msg->twist.twist.linear.y,
                             msg->twist.twist.angular.z,
                             dt);
+      // Track wheel-derived distance since the last GPS fix for the
+      // RTK wrong-fix sanity gate in OnGnss. Speed-magnitude × dt is
+      // the right scalar — direction doesn't matter for the threshold
+      // test, only how far the chassis travelled.
+      const double speed = std::hypot(msg->twist.twist.linear.x, msg->twist.twist.linear.y);
+      wheel_dist_since_last_gps_m_ += speed * dt;
     }
   }
   last_wheel_stamp_ = stamp;
@@ -582,6 +620,36 @@ void FusionGraphNode::OnGnss(sensor_msgs::msg::NavSatFix::ConstSharedPtr msg)
   double mx, my;
   LatLonToMap(msg->latitude, msg->longitude, mx, my);
 
+  // RTK wrong-fix detection — fires before any QueueGnss so a bad
+  // sample never reaches iSAM2. F9P can re-solve the carrier-phase
+  // ambiguity on a different integer set after a brief signal drop
+  // (vegetation, multipath spike) and the new solution jumps by
+  // 3-10 cm while still reporting status=GBAS_FIX with sub-cm
+  // covariance. If the wheel says we didn't move, the jump is not
+  // real motion — drop the sample.
+  if (last_gps_map_xy_)
+  {
+    const double jump = std::hypot(mx - (*last_gps_map_xy_).x(), my - (*last_gps_map_xy_).y());
+    if (jump > rtk_wrongfix_max_jump_m_ && wheel_dist_since_last_gps_m_ < rtk_wrongfix_max_wheel_m_)
+    {
+      graph_->RecordGpsRejectWrongFix();
+      RCLCPP_WARN_THROTTLE(get_logger(),
+                           *get_clock(),
+                           2000,
+                           "fusion_graph: RTK wrong-fix? jump=%.3f m, wheel=%.3f m — sample dropped",
+                           jump,
+                           wheel_dist_since_last_gps_m_);
+      // Reset accumulator + cache so a repeated wrong-fix doesn't
+      // permanently lock us out — once two consecutive samples agree,
+      // last_gps_map_xy_ updates and we resume normal flow.
+      last_gps_map_xy_ = gtsam::Vector2(mx, my);
+      wheel_dist_since_last_gps_m_ = 0.0;
+      return;
+    }
+  }
+  last_gps_map_xy_ = gtsam::Vector2(mx, my);
+  wheel_dist_since_last_gps_m_ = 0.0;
+
   // covariance[0] is variance of east; take sqrt for sigma. Use the
   // diagonal mean for a single sigma_xy (factor model is isotropic).
   const double var_x = msg->position_covariance[0];
@@ -590,14 +658,18 @@ void FusionGraphNode::OnGnss(sensor_msgs::msg::NavSatFix::ConstSharedPtr msg)
   if (!std::isfinite(sigma) || sigma <= 0.0)
     sigma = -1.0;  // floor
 
-  // RTK-Fixed (GBAS_FIX = 2) is sub-cm and statistically Gaussian; any
-  // lower fix quality (Float / single / DGPS) routinely carries
-  // multi-decimetre multipath outliers that the reported covariance
-  // doesn't capture. Robustify with Huber in that case so the optimizer
-  // downweights aberrant samples instead of pulling the trajectory.
+  // Robust noise model on GPS — applied unconditionally now (was
+  // RTK-Float only). Field measurement 2026-05-17 (gps_stability.py,
+  // 10 min stationary on RTK-Fixed 100 %) showed even Fixed solutions
+  // carry σ ≈ 8-12 mm of multipath/constellation noise and the
+  // occasional ~3 cm wrong-fix outlier — well above the 3 mm σ_floor.
+  // Huber at k=1.345 σ keeps Gaussian inliers fully efficient and
+  // smoothly downweights the rare wrong-fix outlier even if the
+  // pre-graph gate above doesn't catch it (e.g. first sample of a
+  // session, or a slow drift that builds up to >5 cm without a
+  // detectable wheel discrepancy).
   const bool rtk_fixed = msg->status.status == sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX;
-  const bool robust = !rtk_fixed;
-  graph_->QueueGnss(mx, my, sigma, robust);
+  graph_->QueueGnss(mx, my, sigma, /*robust=*/true);
   seed_xy_ = gtsam::Vector2(mx, my);
   // Latch whether the most recent seed came from RTK-Fixed so the next
   // graph initialization can use a tight prior matching that quality.
@@ -913,8 +985,63 @@ void FusionGraphNode::OnTimer()
 
   if (use_scan_matching_ && scan_matcher_ && curr_valid && prev_node_scan_valid_)
   {
-    auto res = scan_matcher_->Match(prev_node_scan_, curr_scan, gtsam::Pose2());
-    if (res.ok)
+    // ICP init guess: wheel translation + gyro rotation accumulated
+    // since the previous node. PeekAccumulator returns the current
+    // accum_ contents WITHOUT resetting (Tick() below will reset).
+    // A non-identity init eliminates the 30°+ pivot mismatch that
+    // sends ICP's brute-force NN looking at wrong correspondences;
+    // measured ~3× drop in iteration count and matching success
+    // rate jump on bench fixtures with rotation > 0.3 rad.
+    double dx, dy, dth_gyro, dth_wheel;
+    graph_->PeekAccumulator(dx, dy, dth_gyro, dth_wheel);
+    const double dth_init = (std::abs(dth_gyro) > 1e-9) ? dth_gyro : dth_wheel;
+    const gtsam::Pose2 init_guess(dx, dy, dth_init);
+
+    auto res = scan_matcher_->Match(prev_node_scan_, curr_scan, init_guess);
+
+    // Guard rails — drop the match if any signal screams degenerate.
+    // The factor would otherwise corrupt iSAM2 for many ticks (ICP
+    // scan-between σ is comparable to wheel σ_x; one bad sample
+    // anchors the trajectory away from truth until a strong GPS
+    // observation pulls it back).
+    bool drop = false;
+    if (!res.ok)
+    {
+      // ScanMatcher returned ok=false → too few correspondences for a
+      // valid 2D rigid alignment. Count and skip.
+      graph_->RecordIcpRejectInliers();
+      drop = true;
+    }
+    else if (res.rmse > icp_max_rmse_m_)
+    {
+      graph_->RecordIcpRejectRmse();
+      drop = true;
+    }
+    else if (std::abs(res.delta.x()) > icp_max_delta_xy_m_ ||
+             std::abs(res.delta.y()) > icp_max_delta_xy_m_ ||
+             std::abs(res.delta.theta()) > icp_max_delta_theta_rad_)
+    {
+      // Unphysical delta — at our node period (≤ 50 ms) the
+      // chassis cannot travel > 30 cm or rotate > 0.5 rad.
+      graph_->RecordIcpRejectSanity();
+      drop = true;
+    }
+    else
+    {
+      // Divergence from initial guess: init.between(result) gives the
+      // deviation expressed in Pose2 algebra. Large divergence signals
+      // degenerate scenery (symmetric haie, pure grass) where ICP
+      // converged on a non-truth optimum.
+      const gtsam::Pose2 dev = init_guess.between(res.delta);
+      if (std::hypot(dev.x(), dev.y()) > icp_max_divergence_xy_m_ ||
+          std::abs(dev.theta()) > icp_max_divergence_theta_rad_)
+      {
+        graph_->RecordIcpRejectDivergence();
+        drop = true;
+      }
+    }
+
+    if (!drop)
     {
       graph_->QueueScanBetween(res.delta, res.sigma_xy, res.sigma_theta);
       ++scan_matches_ok_;

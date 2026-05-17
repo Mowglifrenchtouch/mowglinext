@@ -211,6 +211,44 @@ private:
   uint64_t scan_matches_ok_ = 0;
   uint64_t scan_matches_fail_ = 0;
 
+  // RTK wrong-fix detection state. F9P can re-solve carrier-phase
+  // ambiguity on a different integer set after a brief signal drop,
+  // jumping the reported solution by 3-10 cm while still reporting
+  // status=GBAS_FIX with sub-cm covariance. If the wheel odometry
+  // says we did not move that far since the last fix, the jump is
+  // not a real robot motion and absorbing it would yank the iSAM2
+  // trajectory. Skip the sample in that case (counted in
+  // GraphStats.gps_rejects_wrongfix).
+  //
+  // wheel_dist_since_last_gps_m_ accumulates |wheel translation|
+  // between consecutive OnGnss calls; reset to 0 in OnGnss after
+  // the check.
+  std::optional<gtsam::Vector2> last_gps_map_xy_;
+  double wheel_dist_since_last_gps_m_ = 0.0;
+  // GPS jump (m) above which the sample is rejected when the wheel
+  // accumulator stayed under rtk_wrongfix_max_wheel_m_. Picked to be
+  // well above the σ ~1 cm noise floor we measured 2026-05-17 (8-12
+  // mm σ on raw /gps/fix stationary), and below the smallest
+  // legitimate motion the robot can produce in one GPS period
+  // (vx_max ≈ 0.30 m/s × 0.1 s = 30 mm). 50 mm leaves headroom for
+  // 1-2σ outliers while still catching ≥0.5σ wrong-fix jumps.
+  double rtk_wrongfix_max_jump_m_ = 0.05;
+  // Wheel-derived distance (m) traveled since the last GPS sample,
+  // below which a GPS jump > rtk_wrongfix_max_jump_m_ is judged
+  // inconsistent. 20 mm sits just above the per-tick encoder noise
+  // floor — at 0.30 m/s the robot covers 30 mm in 100 ms (one fix
+  // period), so a real motion easily clears 20 mm.
+  double rtk_wrongfix_max_wheel_m_ = 0.02;
+
+  // ICP guard-rail thresholds — see GraphParams comments for the
+  // physical intuition. Declared as ROS params so we can tighten or
+  // loosen them in mowgli_robot.yaml without a rebuild.
+  double icp_max_rmse_m_ = 0.10;
+  double icp_max_delta_xy_m_ = 0.30;
+  double icp_max_delta_theta_rad_ = 0.50;
+  double icp_max_divergence_xy_m_ = 0.15;
+  double icp_max_divergence_theta_rad_ = 0.35;
+
   // In-flight guards for the async maintenance jobs. Save and rebase
   // each run in a detached worker so the executor callback returns
   // immediately; the atomic flag prevents a second worker from
