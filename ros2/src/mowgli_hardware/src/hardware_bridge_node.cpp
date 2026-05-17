@@ -1379,6 +1379,55 @@ private:
       rot_pulse_last_sign_ = 0;
     }
 
+    // Same PWM-style pulse modulation, applied to the linear axis. The
+    // motivation is symmetric: at vx < kMinLinVel both wheels' PWM
+    // commands fall under the firmware deadband (PWM_PER_MPS * vx <
+    // ~40), so FTC's slow final-approach commands during DockRobot
+    // WAITING_FOR_GOAL_APPROACH ended up with the wheels not engaging
+    // at all — the robot would park 15-25 cm out from the dock
+    // staging pose and `max_goal_distance_error=0.10m` would abort,
+    // forever. Gated on |wz| being small too: a combined small vx +
+    // big wz is the existing angular case (handled above), and a
+    // medium |wz| is left as a pass-through because the wheel
+    // differential then puts at least one wheel above the deadband
+    // naturally.
+    constexpr double kMinLinVel = 0.13;            // m/s, ≈ PWM 40
+    constexpr double kWzStationaryThreshold = 0.10;  // rad/s
+    if (std::abs(wz) < kWzStationaryThreshold && vx != 0.0 &&
+        std::abs(vx) < kMinLinVel)
+    {
+      const int sign = (vx > 0.0) ? 1 : -1;
+      if (lin_pulse_last_sign_ != 0 && lin_pulse_last_sign_ != sign)
+      {
+        lin_pulse_accumulator_ = 0.0;
+        lin_pulse_burst_remaining_ = 0;
+      }
+      lin_pulse_last_sign_ = sign;
+      lin_pulse_accumulator_ += std::abs(vx) / kMinLinVel;
+
+      if (lin_pulse_burst_remaining_ > 0)
+      {
+        vx = static_cast<double>(sign) * kMinLinVel;
+        --lin_pulse_burst_remaining_;
+      }
+      else if (lin_pulse_accumulator_ >= static_cast<double>(kPulseBurstTicks))
+      {
+        vx = static_cast<double>(sign) * kMinLinVel;
+        lin_pulse_burst_remaining_ = kPulseBurstTicks - 1;
+        lin_pulse_accumulator_ -= static_cast<double>(kPulseBurstTicks);
+      }
+      else
+      {
+        vx = 0.0;
+      }
+    }
+    else
+    {
+      lin_pulse_accumulator_ = 0.0;
+      lin_pulse_burst_remaining_ = 0;
+      lin_pulse_last_sign_ = 0;
+    }
+
     LlCmdVel pkt{};
     pkt.type = PACKET_ID_LL_CMD_VEL;
     pkt.linear_x = static_cast<float>(vx);
@@ -1510,6 +1559,21 @@ private:
   double rot_pulse_accumulator_{0.0};
   int rot_pulse_burst_remaining_{0};
   int rot_pulse_last_sign_{0};
+
+  // Same scheme on the linear axis: vx commands below ~0.13 m/s (= PWM
+  // 40 / PWM_PER_MPS 300) are eaten by the firmware's PWM deadband on
+  // both wheels, so the controller can't drive a "fine" final-approach
+  // motion when the integrated error is < 15 cm. FTC's DockRobot
+  // WAITING_FOR_GOAL_APPROACH was burning retries on this — robot
+  // parked ~15 cm out from the staging pose because nothing under
+  // kMinLinVel actually rolls the wheels. We pulse-modulate vx the
+  // same way wz is handled above: accumulate fractional ticks of
+  // burst owed at kMinLinVel; fire 3-tick bursts; output zero
+  // otherwise. Long-term average matches the requested vx, and each
+  // burst is long enough to overcome stiction.
+  double lin_pulse_accumulator_{0.0};
+  int lin_pulse_burst_remaining_{0};
+  int lin_pulse_last_sign_{0};
 
   // Dock heading anchor: on is_charging false→true transition, publish
   // dock_heading with wide σ=π for a short window so dock_yaw_to_set_pose
