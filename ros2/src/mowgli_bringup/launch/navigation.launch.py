@@ -390,6 +390,8 @@ def generate_launch_description() -> LaunchDescription:
             rt_rp.get("coverage_xy_tolerance", coverage_xy_tolerance))
         dock_approach_distance = float(
             rt_rp.get("dock_approach_distance", dock_approach_distance))
+        dock_approach_overshoot = float(
+            rt_rp.get("dock_approach_overshoot", 0.05))
         dock_charging_threshold = float(
             rt_rp.get("dock_charging_threshold", dock_charging_threshold))
         # Defensive clip: a stale per-site mowgli_robot.yaml can carry
@@ -472,7 +474,22 @@ def generate_launch_description() -> LaunchDescription:
         home_dock = (doc.setdefault("docking_server", {})
                         .setdefault("ros__parameters", {})
                         .setdefault("home_dock", {}))
-        home_dock["pose"] = [dock_pose_x, dock_pose_y, dock_pose_yaw]
+        # Apply dock_approach_overshoot in the body forward direction.
+        # opennav_docking's graceful_controller will drive toward this
+        # shifted target and stop at docking_threshold (5 cm) before it,
+        # putting the robot physically at the calibrated dock_pose with
+        # firm contact on the charging cradle — instead of stopping
+        # 5 cm short like the un-offset configuration did 2026-05-17.
+        # The overshoot is yaml-tunable (dock_approach_overshoot in
+        # mowgli_robot.yaml); 0 disables the shift cleanly.
+        import math as _math
+        _cos_yaw = _math.cos(dock_pose_yaw)
+        _sin_yaw = _math.sin(dock_pose_yaw)
+        home_dock["pose"] = [
+            dock_pose_x + dock_approach_overshoot * _cos_yaw,
+            dock_pose_y + dock_approach_overshoot * _sin_yaw,
+            dock_pose_yaw,
+        ]
         # Staging pose offset along the dock's X axis (negative = behind
         # the dock, the side the robot approaches from). yaml exposes
         # dock_approach_distance as a positive metres knob in the GUI;
