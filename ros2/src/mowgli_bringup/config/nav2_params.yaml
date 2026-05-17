@@ -76,11 +76,18 @@ controller_server:
     # 5s vs 0.3s default — ARM scheduler jitter can stall local_costmap
     # updates 2-3s under load; the controller would error out otherwise.
     costmap_update_timeout: 5.0
-    # 0.08 m/s zeroes outputs below the firmware ~PWM 40 deadband so the
-    # motors don't buzz instead of moving. Matches hardware_bridge deadband.
-    min_x_velocity_threshold: 0.08
+    # min_*_velocity_threshold disabled — hardware_bridge now has a
+    # closed-loop deadband compensator (PR #228) that boosts stalled
+    # motors to the firmware ~PWM 40 deadband. Leaving these at the old
+    # 0.08 / 0.001 floors would zero MPPI's ramp-up commands before
+    # they reach hardware_bridge, so the compensator never sees them and
+    # the robot stays parked even though the controllers asked it to
+    # move. Field-observed 2026-05-17 on CMD=2 HOME: MPPI raw output
+    # ≈ (0.05, 0.01) was getting clamped to (0.00, 0.01) by these
+    # filters, leaving the wheels in deadband.
+    min_x_velocity_threshold: 0.0
     min_y_velocity_threshold: 0.0
-    min_theta_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.0
     failure_tolerance: 1.0
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["stopped_goal_checker", "coverage_goal_checker"]
