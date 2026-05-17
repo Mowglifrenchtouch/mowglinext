@@ -745,7 +745,13 @@ def generate_launch_description() -> LaunchDescription:
         name="dock_yaw_to_set_pose",
         output="screen",
         parameters=[
+            # dock_pose_x / dock_pose_y added 2026-05-17 (PR #238) — the
+            # node now seeds the SetPose at the calibrated dock pose
+            # instead of the live GPS sample, so it needs the persisted
+            # (x, y) alongside the existing yaw.
             {"use_sim_time": use_sim_time,
+             "dock_pose_x": dock_pose_x,
+             "dock_pose_y": dock_pose_y,
              "dock_pose_yaw": dock_pose_yaw,
              "dock_pose_yaw_sigma_rad": dock_pose_yaw_sigma_rad},
         ],
