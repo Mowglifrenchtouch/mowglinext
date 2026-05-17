@@ -151,6 +151,11 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_adaptive_noise fusion_graph_core)
 
+  ament_add_gtest(test_pose_extrapolator
+    test/test_pose_extrapolator.cpp
+  )
+  target_link_libraries(test_pose_extrapolator fusion_graph_core)
+
   # Performance benchmarks. Long-running (~30 s on ARM); only meaningful
   # in Release builds. Output is grep-friendly for tracking regressions.
   ament_add_gtest(test_perf

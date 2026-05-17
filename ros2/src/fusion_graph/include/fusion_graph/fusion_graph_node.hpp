@@ -33,6 +33,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "fusion_graph/graph_manager.hpp"
+#include "fusion_graph/pose_extrapolator.hpp"
 #include "fusion_graph/scan_matcher.hpp"
 #include <Eigen/Core>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
@@ -182,6 +183,11 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr pub_fg_yaw_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr pub_diag_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_markers_;
+  // High-rate extrapolated pose (item #15). Same Odometry shape as
+  // /odometry/filtered_map but at 100 Hz, with yaw projected forward
+  // by the latest IMU gyro sample. Position is the unmodified last
+  // fusion-published value. See PoseExtrapolator for the math.
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_fast_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
   // TF for odom->base_footprint (we publish map->odom; need to compose
@@ -193,6 +199,12 @@ private:
   rclcpp::TimerBase::SharedPtr diag_timer_;
   rclcpp::TimerBase::SharedPtr periodic_save_timer_;
   rclcpp::TimerBase::SharedPtr maintenance_timer_;
+  // 100 Hz high-rate pose republisher (item #15). Only runs when
+  // fast_pose_publish_rate_hz_ > 0 in yaml; default off so existing
+  // installs aren't surprised by extra topic traffic.
+  rclcpp::TimerBase::SharedPtr fast_pose_timer_;
+  PoseExtrapolator pose_extrap_;
+  double fast_pose_publish_rate_hz_ = 0.0;
 
   // Memory + compute bounding parameters.
   uint64_t scan_retention_nodes_ = 18000;  // 30 min @ 10 Hz

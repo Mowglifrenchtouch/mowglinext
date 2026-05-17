@@ -132,6 +132,16 @@ fusion_graph_node:
     odom_frame: odom
     base_frame: base_footprint
 
+    # ── High-rate extrapolated pose (item #15) ────────────────────────
+    # When > 0, fusion_graph_node publishes /odometry/filtered_map_fast
+    # at this rate (Hz), with yaw projected forward from the latest
+    # iSAM2-published pose using the most recent IMU gyro_z sample.
+    # Off by default (0) — opt in from yaml when display latency is
+    # the bottleneck (e.g. operator GUI during pivots). Consumers that
+    # need precise pose for control should keep using
+    # /odometry/filtered_map at 50 Hz.
+    fast_pose_publish_rate_hz: 0.0
+
     # ── TF publish lead time ──────────────────────────────────────────
     # Default 0.0 = HARDWARE-correct (no forward extrapolation).
     # sim_full_system.launch.py overrides to 0.1 because under

@@ -218,6 +218,54 @@ FusionGraphNode::FusionGraphNode(const rclcpp::NodeOptions& opts)
 
   // ── Pubs/subs ─────────────────────────────────────────────────────
   pub_odom_ = create_publisher<nav_msgs::msg::Odometry>("/odometry/filtered_map", 10);
+
+  // High-rate extrapolated pose (item #15). Off by default — set
+  // fast_pose_publish_rate_hz > 0 in yaml to enable. 100 Hz is the
+  // intended use; the publisher reuses the latest fusion pose and
+  // projects yaw forward by latest IMU gyro_z. Marked as a
+  // best-effort feed because consumers should fall back to the
+  // canonical /odometry/filtered_map for control loops.
+  fast_pose_publish_rate_hz_ =
+      declare_parameter<double>("fast_pose_publish_rate_hz", 0.0);
+  if (fast_pose_publish_rate_hz_ > 0.0)
+  {
+    pub_odom_fast_ = create_publisher<nav_msgs::msg::Odometry>(
+        "/odometry/filtered_map_fast", rclcpp::SensorDataQoS());
+    const auto period =
+        std::chrono::duration<double>(1.0 / fast_pose_publish_rate_hz_);
+    fast_pose_timer_ = create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(period),
+        [this]()
+        {
+          if (!pose_extrap_.HasFusionPose())
+            return;
+          const double now_s = this->now().seconds();
+          auto extrap = pose_extrap_.Extrapolate(now_s);
+          if (!extrap)
+            return;
+          nav_msgs::msg::Odometry msg;
+          msg.header.stamp = this->now();
+          msg.header.frame_id = map_frame_;
+          msg.child_frame_id = base_frame_;
+          msg.pose.pose.position.x = extrap->x();
+          msg.pose.pose.position.y = extrap->y();
+          msg.pose.pose.position.z = 0.0;
+          msg.pose.pose.orientation = QuatFromYaw(extrap->theta());
+          // Loose covariance — this is a display / latency-sensitive
+          // feed, not a primary measurement. Consumers that need
+          // tight σ should subscribe to /odometry/filtered_map.
+          for (int i = 0; i < 36; ++i)
+            msg.pose.covariance[i] = 0.0;
+          msg.pose.covariance[0] = 0.10 * 0.10;
+          msg.pose.covariance[7] = 0.10 * 0.10;
+          msg.pose.covariance[35] = 0.10 * 0.10;
+          pub_odom_fast_->publish(msg);
+        });
+    RCLCPP_INFO(get_logger(),
+                "fusion_graph: high-rate pose extrapolator enabled at %.1f Hz",
+                fast_pose_publish_rate_hz_);
+  }
+
   // /imu/fg_yaw — yaw-only sensor_msgs/Imu published BEST_EFFORT to
   // match cog_to_imu / mag_yaw_publisher conventions. Lets ekf_map_node
   // (when running as primary in observer mode) subscribe as a yaw
@@ -610,6 +658,10 @@ void FusionGraphNode::OnImu(sensor_msgs::msg::Imu::ConstSharedPtr msg)
     }
   }
   last_imu_stamp_ = stamp;
+  // Feed the high-rate extrapolator (item #15) too. Safe even when
+  // fast_pose_timer_ is null — the extrapolator is just a value
+  // cache.
+  pose_extrap_.OnImuGyro(stamp.seconds(), msg->angular_velocity.z);
 }
 
 void FusionGraphNode::OnGnss(sensor_msgs::msg::NavSatFix::ConstSharedPtr msg)
@@ -1210,6 +1262,11 @@ void FusionGraphNode::PublishOutputs(const TickOutput& out)
   odom.pose.covariance[21] = 1e-9;
   odom.pose.covariance[28] = 1e-9;
   pub_odom_->publish(odom);
+
+  // Rebaseline the high-rate extrapolator (item #15). The fast
+  // publisher will project yaw forward from this pose until the
+  // next fusion tick.
+  pose_extrap_.OnFusionPose(this->now().seconds(), out.pose);
 
   // 1b. /imu/fg_yaw — yaw-only sensor_msgs/Imu (cov_yaw, others 1e6
   //     to disable). Published in both primary and observer mode so
