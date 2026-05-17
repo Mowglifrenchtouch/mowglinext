@@ -12,15 +12,21 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cedbossneo/mowglinext/pkg/types"
 )
 
-// Paths to the runtime calibration artefacts and the robot config that
-// owns the dock pose. Kept as package constants so tests can shadow
-// them via locals if needed.
+// Paths to the runtime calibration artefacts. The mowgli_robot.yaml
+// path is provided at runtime by the DB provider (key
+// system.mower.yamlConfigFile) because it differs between containers
+// (gui sees /mowgli_config/mowgli_robot.yaml, ros2 sees
+// /ros2_ws/config/mowgli_robot.yaml). The earlier hardcoded constant
+// caused this endpoint to silently report Present=false on the gui
+// container, which then surfaced as the "dock calibration missing"
+// banner in the GUI even when the dock pose was correctly persisted.
 const (
-	imuCalibrationPath  = "/ros2_ws/maps/imu_calibration.txt"
-	magCalibrationPath  = "/ros2_ws/maps/mag_calibration.yaml"
-	mowgliRobotYamlPath = "/ros2_ws/config/mowgli_robot.yaml"
+	imuCalibrationPath = "/ros2_ws/maps/imu_calibration.txt"
+	magCalibrationPath = "/ros2_ws/maps/mag_calibration.yaml"
 )
 
 // ---------------------------------------------------------------------------
@@ -77,24 +83,27 @@ type CalibrationStatusResponse struct {
 // ---------------------------------------------------------------------------
 
 // RegisterCalibrationStatusRoute wires GET /calibration/status into the
-// existing calibration group. Called from CalibrationRoutes below via a
-// small extension — the status endpoint is read-only and does not need
-// a ROS provider.
-func registerCalibrationStatusRoute(group *gin.RouterGroup) {
-	group.GET("/status", getCalibrationStatus)
+// existing calibration group. The DB provider is needed so we can
+// resolve the runtime path of mowgli_robot.yaml instead of relying on
+// a hardcoded constant (the gui and ros2 containers mount the file at
+// different paths).
+func registerCalibrationStatusRoute(group *gin.RouterGroup, dbProvider types.IDBProvider) {
+	group.GET("/status", getCalibrationStatus(dbProvider))
 }
 
 // ---------------------------------------------------------------------------
 // GET /calibration/status
 // ---------------------------------------------------------------------------
 
-func getCalibrationStatus(c *gin.Context) {
-	resp := CalibrationStatusResponse{
-		Dock: readDockCalibrationStatus(),
-		Imu:  readImuCalibrationStatus(),
-		Mag:  readMagCalibrationStatus(),
+func getCalibrationStatus(dbProvider types.IDBProvider) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		resp := CalibrationStatusResponse{
+			Dock: readDockCalibrationStatus(dbProvider),
+			Imu:  readImuCalibrationStatus(),
+			Mag:  readMagCalibrationStatus(),
+		}
+		c.JSON(http.StatusOK, resp)
 	}
-	c.JSON(http.StatusOK, resp)
 }
 
 // readDockCalibrationStatus reads dock_pose_x/y/yaw from
@@ -102,8 +111,13 @@ func getCalibrationStatus(c *gin.Context) {
 // calibrate_imu_yaw_node and /map_server_node/set_docking_point.
 // Reports {Present: false} when the file is missing or the dock pose
 // is still all-zero (uninitialised configuration).
-func readDockCalibrationStatus() DockCalibrationStatus {
-	data, err := os.ReadFile(mowgliRobotYamlPath)
+func readDockCalibrationStatus(dbProvider types.IDBProvider) DockCalibrationStatus {
+	mowgliRobotYamlPath, err := dbProvider.Get("system.mower.yamlConfigFile")
+	if err != nil {
+		logrus.Warnf("calibration_status: cannot resolve yaml path from db: %v", err)
+		return DockCalibrationStatus{Present: false, Error: "cannot resolve yaml path"}
+	}
+	data, err := os.ReadFile(string(mowgliRobotYamlPath))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return DockCalibrationStatus{Present: false}

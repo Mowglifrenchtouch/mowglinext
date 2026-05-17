@@ -50,11 +50,11 @@ type CalibrateImuYawResponse struct {
 // ---------------------------------------------------------------------------
 
 // CalibrationRoutes registers sensor-calibration endpoints.
-func CalibrationRoutes(r *gin.RouterGroup, rosProvider types.IRosProvider) {
+func CalibrationRoutes(r *gin.RouterGroup, rosProvider types.IRosProvider, dbProvider types.IDBProvider) {
 	group := r.Group("/calibration")
 	group.POST("/imu-yaw", postCalibrateImuYaw(rosProvider))
 	group.POST("/magnetometer", postCalibrateMagnetometer(rosProvider))
-	registerCalibrationStatusRoute(group)
+	registerCalibrationStatusRoute(group, dbProvider)
 }
 
 // ---------------------------------------------------------------------------
