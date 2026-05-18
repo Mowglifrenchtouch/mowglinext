@@ -568,11 +568,10 @@ export const DiagnosticsPage = () => {
     const deltaFilterCog = (!cogStale && cogYawDeg !== null) ? wrap180(yaw - cogYawDeg) : null;
 
     // ── Fusion Graph (iSAM2) panel ───────────────────────────────────────────
-    // Only shown when the operator opted into the GTSAM factor-graph
-    // localizer (use_fusion_graph=true). The panel surfaces the per-tick
-    // GraphStats published on /fusion_graph/diagnostics + Save/Clear actions.
+    // fusion_graph_node is the sole map-frame localizer; the panel
+    // surfaces the per-tick GraphStats it publishes on
+    // /fusion_graph/diagnostics + the Save/Clear service actions.
 
-    const useFusionGraph = String((settings as any)?.use_fusion_graph ?? "false") === "true";
     const guiApi = useApi();
     const mowerAction = useMowerAction();
     const resetEmergencyAction = mowerAction("emergency", {Emergency: 0});
@@ -622,7 +621,7 @@ export const DiagnosticsPage = () => {
     const scanTotal = (scanOk ?? 0) + (scanFail ?? 0);
     const scanRate = scanTotal > 0 ? Math.round(((scanOk ?? 0) / scanTotal) * 100) : null;
 
-    const sectionFusionGraph = useFusionGraph ? (
+    const sectionFusionGraph = (
         <Row gutter={[12, 12]}>
             <Col span={24}>
                 <Card
@@ -714,12 +713,12 @@ export const DiagnosticsPage = () => {
                 </Card>
             </Col>
         </Row>
-    ) : null;
+    );
 
     const sectionHeadingSources = (
         <Row gutter={[12, 12]}>
             <Col span={24}>
-                <Card title={<Space><CompassOutlined/> Heading sources {useFusionGraph ? "(fused by fusion_graph)" : "(fused by ekf_map)"}</Space>} size="small">
+                <Card title={<Space><CompassOutlined/> Heading sources (fused by fusion_graph)</Space>} size="small">
                     <Row gutter={[12, 12]}>
                         <Col xs={24} md={8}>
                             <Space direction="vertical" style={{width: "100%"}}>
@@ -1423,11 +1422,11 @@ export const DiagnosticsPage = () => {
                             label: <Space><CompassOutlined/> Localization</Space>,
                             children: sectionLocalization,
                         },
-                        ...(sectionFusionGraph ? [{
+                        {
                             key: "fusion_graph",
                             label: <Space><CompassOutlined/> Fusion Graph</Space>,
                             children: sectionFusionGraph,
-                        }] : []),
+                        },
                         {
                             key: "heading_sources",
                             label: <Space><CompassOutlined/> Heading sources</Space>,
