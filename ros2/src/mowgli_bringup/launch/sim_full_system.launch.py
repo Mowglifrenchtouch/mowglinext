@@ -424,29 +424,28 @@ def generate_launch_description() -> LaunchDescription:
                 # map→odom TF never converged.
                 "input_topic": "/imu/data_sim",
                 "output_topic": "/imu/data",
-                # All bias + white noise temporarily zeroed for
-                # fusion_graph debugging — gives a perfect-sensor sim so
-                # we can isolate algorithm behaviour from sensor noise.
-                # Restore the MPU-9250 / LIS6DSL defaults once the
-                # baseline is clean (gyro_white_std=0.005, walk=1e-4,
-                # init=1e-3; accel_white_std=0.05, walk=1e-3,
-                # init=0.05).
-                "gyro_white_std": 0.0,
-                "gyro_bias_walk_std": 0.0,
-                "gyro_bias_init_std": 0.0,
-                "accel_white_std": 0.0,
-                "accel_bias_walk_std": 0.0,
-                "accel_bias_init_std": 0.0,
+                # MEMS / consumer-grade noise matching the production
+                # ICM-45686 / MPU-6050 / LSM6DSL-class IMUs the
+                # firmware drives. Values picked from the conservative
+                # end of each chip's datasheet at the firmware's 100 Hz
+                # bandwidth — see ros2/src/mowgli_simulation/scripts/
+                # sim_imu_noise.py docstring for the model.
+                "gyro_white_std": 0.005,        # rad/s
+                "gyro_bias_walk_std": 1.0e-4,   # rad/s/sqrt(s)
+                "gyro_bias_init_std": 1.0e-3,   # rad/s
+                "accel_white_std": 0.05,        # m/s^2
+                "accel_bias_walk_std": 1.0e-3,  # m/s^2/sqrt(s)
+                "accel_bias_init_std": 0.05,    # m/s^2
                 "noise_seed": 42,
-                # Perfect-IMU sim mode: bypass Webots gyro/accel entirely
-                # and synthesize from /cmd_vel. The Webots IMU is gyro-
-                # noisy by construction (ODE physics leaks angular drift
-                # between kinematic-drive teleport ticks → ~0.03 rad/s
-                # phantom yaw rate even when stationary, which the EKF
-                # accumulates into a 5°/s map-yaw drift). Setting
-                # white/walk noise to 0 was not enough because that
-                # noise comes from /imu/data_sim, not from this node.
-                "synthesize_from_cmd_vel": True,
+                # Use the Webots gyro/accel directly (no cmd_vel
+                # synthesis). The kinematic_drive plugin now runs the
+                # firmware motor model end-to-end (deadband + PI +
+                # saturation), so the Webots-reported chassis motion
+                # IS the achievable-twist post-firmware response. An
+                # IMU synthesized from raw cmd_vel would lie about
+                # sub-deadband stalled rotations and starve the
+                # fusion_graph wheel/gyro consistency checks.
+                "synthesize_from_cmd_vel": False,
                 "cmd_vel_topic": "/cmd_vel",
             }
         ],

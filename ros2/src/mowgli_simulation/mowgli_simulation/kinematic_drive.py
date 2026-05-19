@@ -114,7 +114,7 @@ import math
 import time
 
 import rclpy
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 
 
 class KinematicDrive:
@@ -240,6 +240,17 @@ class KinematicDrive:
         # controller's use_stamped_vel: true.
         self.__node.create_subscription(
             TwistStamped, topic, self.__cmd_vel_callback, 1
+        )
+
+        # Ground-truth pose publisher. The kinematic teleport pose
+        # (self.__x, self.__y, self.__yaw) is the sim's authoritative
+        # chassis location — untouched by sensor noise, fusion_graph
+        # belief drift, or RTK wrong-fix gating. fake_hardware reads
+        # this for charging detection (mirrors the real robot's
+        # physical-contact charging signal — not a pose-estimate
+        # derivation that could lie when the localizer is wobbling).
+        self.__gt_pose_pub = self.__node.create_publisher(
+            PoseStamped, "/sim/ground_truth_pose", 10
         )
 
         # Latest commanded velocity. Default to zero so the robot is at
@@ -441,6 +452,19 @@ class KinematicDrive:
         # motion. (Future: ride a heightmap by reading z from a lookup.)
         self.__translation_field.setSFVec3f([self.__x, self.__y, self.__z])
         self.__rotation_field.setSFRotation([0.0, 0.0, 1.0, self.__yaw])
+
+        # Publish ground-truth pose. Same step as the teleport so any
+        # subscriber sees the chassis at the position the sim is
+        # actually rendering.
+        gt = PoseStamped()
+        gt.header.stamp = self.__node.get_clock().now().to_msg()
+        gt.header.frame_id = "map"
+        gt.pose.position.x = self.__x
+        gt.pose.position.y = self.__y
+        gt.pose.position.z = self.__z
+        gt.pose.orientation.z = math.sin(self.__yaw * 0.5)
+        gt.pose.orientation.w = math.cos(self.__yaw * 0.5)
+        self.__gt_pose_pub.publish(gt)
 
         # Set the chassis ODE velocity to match the commanded body
         # motion each tick.
