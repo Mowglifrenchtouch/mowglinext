@@ -244,22 +244,25 @@ controller_server:
       speed_slow: 0.16    # ≥ kMinLinVel=0.15 host clamp (hardware_bridge on_cmd_vel)
       speed_angular: 45.0
       acceleration: 0.2
-      # FTC PID gains — detuned 2026-05-19 for the wheel-level PI motor
-      # model (b303db22) and production-grade sensor noise. The earlier
-      # kp_lat=2.0/kp_ang=1.5 produced corrections that overshot the
-      # motor-PI's 200 ms ramp-up across the static-friction deadband,
-      # causing FTC to whipsaw the chassis ±100° per sample on coverage
-      # mid-runs. Lower kp_lat and raise kd_lat for more damping; lower
-      # kp_ang so heading corrections stay below the deadband-overshoot
-      # zone until the motor actually moves. Trade-off: tracking lat
-      # error converges slower (~3 s vs ~1 s at 0.5 m/s) but stably.
+      # FTC PID gains. 2026-05-19:
+      #   * kp_lat 2.0→1.2, kd_lat 1.0→1.5 — detuned for the wheel-PI
+      #     motor model (b303db22) to stop the chassis whipsawing on
+      #     coverage swaths. Lat error converges in ~3 s vs ~1 s but
+      #     stably.
+      #   * kp_ang held at 1.5 — dropping it to 1.0 made PRE_ROTATE
+      #     pivots never converge: cmd_vel correction stayed below the
+      #     motor-PI deadband-crossing threshold under production IMU
+      #     noise, so the pose never rotated, ang_err stayed at ~180°,
+      #     the robot spun forever and cog_to_imu's straight-line gate
+      #     rejected every sample. Higher kp_ang keeps the pivot
+      #     command above the deadband.
       kp_lon: 1.0
       ki_lon: 0.0
       kd_lon: 0.0
       kp_lat: 1.2
       ki_lat: 0.0
       kd_lat: 1.5
-      kp_ang: 1.0
+      kp_ang: 1.5
       ki_ang: 0.0
       kd_ang: 0.0
       max_cmd_vel_speed: 0.30

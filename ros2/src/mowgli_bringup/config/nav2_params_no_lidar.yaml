@@ -184,7 +184,7 @@ controller_server:
       kp_lat: 1.2
       ki_lat: 0.0
       kd_lat: 1.5
-      kp_ang: 1.0
+      kp_ang: 1.5
       ki_ang: 0.0
       kd_ang: 0.0
       max_cmd_vel_speed: 0.30
