@@ -104,15 +104,21 @@ TEST(GnssStatusAdapterTest, FallsBackToDefaultQualityForFixType)
   EXPECT_FLOAT_EQ(msg.quality_percent, 25.0f);
 }
 
-TEST(GnssStatusAdapterTest, DoesNotSetValueFlagsWithoutDeclaredCapability)
+TEST(GnssStatusAdapterTest, RejectsValuesWithoutDeclaredCapabilities)
 {
   GnssRuntimeState state;
   state.hdop = 0.6f;
 
-  const auto msg = ToGnssStatusMessage(state);
-  EXPECT_EQ(msg.capability_flags & mowgli_interfaces::msg::GnssStatus::CAP_HDOP, 0u);
-  EXPECT_EQ(msg.value_flags & mowgli_interfaces::msg::GnssStatus::CAP_HDOP, 0u);
-  EXPECT_FLOAT_EQ(msg.hdop, 0.0f);
+#if !defined(NDEBUG)
+  EXPECT_DEATH(
+      {
+        const auto msg = ToGnssStatusMessage(state);
+        static_cast<void>(msg);
+      },
+      "value_flags may only be set for fields already declared in capability_flags");
+#else
+  GTEST_SKIP() << "Assertions are disabled in this build, so the invariant cannot be validated.";
+#endif
 }
 
 TEST(GnssStatusAdapterTest, MapsMinimalNmeaLikeStateWithoutInventingRichFields)

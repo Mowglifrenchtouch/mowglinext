@@ -10,6 +10,21 @@ namespace mowgli_localization
 namespace
 {
 
+constexpr rcl_clock_type_t kTestClockType = RCL_ROS_TIME;
+
+builtin_interfaces::msg::Time MakeRosStamp(int32_t sec, uint32_t nanosec = 0u)
+{
+  builtin_interfaces::msg::Time stamp;
+  stamp.sec = sec;
+  stamp.nanosec = nanosec;
+  return stamp;
+}
+
+rclcpp::Time MakeRosTime(int32_t sec, uint32_t nanosec = 0u)
+{
+  return rclcpp::Time(sec, nanosec, kTestClockType);
+}
+
 diagnostic_msgs::msg::DiagnosticStatus MakeDiag(const std::string& name,
                                                 std::initializer_list<std::pair<const char*, const char*>> kvs)
 {
@@ -29,8 +44,7 @@ diagnostic_msgs::msg::DiagnosticArray MakeArray(
     std::initializer_list<diagnostic_msgs::msg::DiagnosticStatus> statuses)
 {
   diagnostic_msgs::msg::DiagnosticArray array;
-  array.header.stamp.sec = 12;
-  array.header.stamp.nanosec = 0;
+  array.header.stamp = MakeRosStamp(12);
   array.status.assign(statuses.begin(), statuses.end());
   return array;
 }
@@ -55,7 +69,7 @@ TEST(GnssRuntimeStateBuilderTest, ResolveGnssBackendHandlesExplicitLegacyAndUnkn
 TEST(GnssRuntimeStateBuilderTest, BuildsMinimalNmeaStateFromNavSatFixWithoutInventingFields)
 {
   sensor_msgs::msg::NavSatFix fix;
-  fix.header.stamp.sec = 12;
+  fix.header.stamp = MakeRosStamp(12);
   fix.header.frame_id = "gps_link";
   fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_SBAS_FIX;
   fix.position_covariance_type = sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
@@ -82,7 +96,7 @@ TEST(GnssRuntimeStateBuilderTest, BuildsMinimalNmeaStateFromNavSatFixWithoutInve
 TEST(GnssRuntimeStateBuilderTest, EnrichesUbloxStateFromStructuredDiagnostics)
 {
   sensor_msgs::msg::NavSatFix fix;
-  fix.header.stamp.sec = 12;
+  fix.header.stamp = MakeRosStamp(12);
   fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
 
   auto state = BuildGnssRuntimeStateFromFix(fix, GnssBackendKind::kUblox);
@@ -130,14 +144,14 @@ TEST(GnssRuntimeStateBuilderTest, EnrichesUbloxStateFromStructuredDiagnostics)
 TEST(GnssRuntimeStateBuilderTest, RejectsDiagnosticsThatAreNewerThanFixOrTooStale)
 {
   sensor_msgs::msg::NavSatFix fix;
-  fix.header.stamp.sec = 12;
+  fix.header.stamp = MakeRosStamp(12);
   fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
 
   auto state_future = BuildGnssRuntimeStateFromFix(fix, GnssBackendKind::kUblox);
   auto future_snapshot = BuildGnssDiagnosticSnapshot(MakeArray({
       MakeDiag("GPS: fix", {{"gps_fix_ok", "True"}, {"carr_soln", "fixed"}}),
   }));
-  future_snapshot.stamp = rclcpp::Time(13, 0);
+  future_snapshot.stamp = MakeRosTime(13);
   EnrichGnssRuntimeStateFromDiagnostics(state_future, GnssBackendKind::kUblox, future_snapshot, 5.0);
   EXPECT_EQ(state_future.fix_type, GnssFixType::kGpsFix);
 
@@ -145,7 +159,7 @@ TEST(GnssRuntimeStateBuilderTest, RejectsDiagnosticsThatAreNewerThanFixOrTooStal
   auto stale_snapshot = BuildGnssDiagnosticSnapshot(MakeArray({
       MakeDiag("GPS: fix", {{"gps_fix_ok", "True"}, {"carr_soln", "fixed"}}),
   }));
-  stale_snapshot.stamp = rclcpp::Time(6, 0);
+  stale_snapshot.stamp = MakeRosTime(6);
   EnrichGnssRuntimeStateFromDiagnostics(state_stale, GnssBackendKind::kUblox, stale_snapshot, 5.0);
   EXPECT_EQ(state_stale.fix_type, GnssFixType::kGpsFix);
 }
@@ -153,7 +167,7 @@ TEST(GnssRuntimeStateBuilderTest, RejectsDiagnosticsThatAreNewerThanFixOrTooStal
 TEST(GnssRuntimeStateBuilderTest, EnrichesUnicoreStateFromStructuredDiagnostics)
 {
   sensor_msgs::msg::NavSatFix fix;
-  fix.header.stamp.sec = 12;
+  fix.header.stamp = MakeRosStamp(12);
   fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
 
   auto state = BuildGnssRuntimeStateFromFix(fix, GnssBackendKind::kUnicore);
@@ -229,7 +243,7 @@ TEST(GnssRuntimeStateBuilderTest, ParsesUnicoreDualAntennaDiagnosticStringsCaseI
   for (const auto& c : cases)
   {
     sensor_msgs::msg::NavSatFix fix;
-    fix.header.stamp.sec = 12;
+    fix.header.stamp = MakeRosStamp(12);
     fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
     auto state = BuildGnssRuntimeStateFromFix(fix, GnssBackendKind::kUnicore);
     auto snapshot = BuildGnssDiagnosticSnapshot(MakeArray({
@@ -244,7 +258,7 @@ TEST(GnssRuntimeStateBuilderTest, ParsesUnicoreDualAntennaDiagnosticStringsCaseI
 TEST(GnssRuntimeStateBuilderTest, UnicoreUsesReceiverCorrectionAgeBeforeTransportAge)
 {
   sensor_msgs::msg::NavSatFix fix;
-  fix.header.stamp.sec = 12;
+  fix.header.stamp = MakeRosStamp(12);
   fix.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
 
   auto state = BuildGnssRuntimeStateFromFix(fix, GnssBackendKind::kUnicore);
