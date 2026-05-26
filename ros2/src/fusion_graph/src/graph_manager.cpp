@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <ios>
@@ -14,6 +15,7 @@
 #include <gtsam/base/GenericValue.h>
 #include <gtsam/base/serialization.h>
 #include <gtsam/linear/NoiseModel.h>
+#include <gtsam/linear/linearExceptions.h>
 #include <gtsam/nonlinear/ISAM2Params.h>
 #include <gtsam/nonlinear/Marginals.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -228,7 +230,7 @@ void GraphManager::Initialize(const gtsam::Pose2& X0,
         gtsam::PriorFactor<double>(k_bias0, 0.0, bias_prior_noise));
   }
 
-  isam_.update(new_factors_, new_values_);
+  ApplyIsamUpdateLocked(new_factors_, new_values_);
   estimate_dirty_ = true;
   new_factors_.resize(0);
   new_values_.clear();
@@ -608,6 +610,8 @@ GraphStats GraphManager::Stats() const
   s.wheel_sigma_x_eff = last_wheel_sigma_x_eff_;
   s.gyro_bias_z = gyro_bias_z_;
   s.gyro_bias_updates = gyro_bias_updates_;
+  s.isam_update_attempts = isam_update_attempts_;
+  s.isam_update_failures = isam_update_failures_;
   return s;
 }
 
@@ -843,7 +847,26 @@ void GraphManager::RebaseISAM2()
   {
     fg.add(gtsam::PriorFactor<gtsam::Pose2>(kv.key, kv.value.cast<gtsam::Pose2>(), noise));
   }
-  fresh.update(fg, estimate_snapshot);
+  // fresh.update on a clean iSAM2 with PriorFactors is normally safe,
+  // but a degenerate cached estimate could still trip the same
+  // IndeterminantLinearSystem path. Abort the rebase rather than crash —
+  // the live isam_ is untouched, so the system keeps running on the
+  // pre-rebase tree.
+  try
+  {
+    fresh.update(fg, estimate_snapshot);
+  }
+  catch (const std::exception& ex)
+  {
+    std::fprintf(stderr,
+                 "[fusion_graph] RebaseISAM2 phase 2 update threw, aborting rebase: %s\n",
+                 ex.what());
+    std::lock_guard<std::mutex> lock(mu_);
+    rebase_in_progress_ = false;
+    rebase_pending_factors_.resize(0);
+    rebase_pending_values_.clear();
+    return;
+  }
 
   // Phase 3: replay anything Tick / ForceAnchor / AddLoopClosure
   // added while we were rebuilding, then atomically swap isam_.
@@ -860,7 +883,20 @@ void GraphManager::RebaseISAM2()
     }
     if (rebase_pending_factors_.size() > 0 || rebase_pending_values_.size() > 0)
     {
-      fresh.update(rebase_pending_factors_, rebase_pending_values_);
+      try
+      {
+        fresh.update(rebase_pending_factors_, rebase_pending_values_);
+      }
+      catch (const std::exception& ex)
+      {
+        std::fprintf(stderr,
+                     "[fusion_graph] RebaseISAM2 phase 3 replay threw, aborting rebase: %s\n",
+                     ex.what());
+        rebase_in_progress_ = false;
+        rebase_pending_factors_.resize(0);
+        rebase_pending_values_.clear();
+        return;
+      }
     }
     isam_ = std::move(fresh);
     estimate_dirty_ = true;
@@ -877,7 +913,55 @@ void GraphManager::RebaseISAM2()
 void GraphManager::ApplyIsamUpdateLocked(const gtsam::NonlinearFactorGraph& fg,
                                          const gtsam::Values& values)
 {
-  isam_.update(fg, values);
+  // iSAM2.update can throw IndeterminantLinearSystemException when the
+  // batch of factors + the existing graph briefly becomes rank-deficient
+  // during Cholesky factorisation (numerical conditioning near a
+  // saddle point in the optimisation, not a structural problem). Letting
+  // that propagate kills the process — the launch system respawns
+  // fusion_graph_node, the EKF yaw resets to 0, and /gps/absolute_pose
+  // jumps by 2 · lever_arm via the lever-arm projection until COG /
+  // mag re-anchor. From the operator's perspective that looks like an
+  // unstable position.
+  //
+  // Catching here lets the system stay alive across the rare bad batch.
+  // GTSAM's contract is "if update throws, the iSAM2 internal state is
+  // unchanged" — so the next update will re-attempt on the same Bayes
+  // tree, typically with a different linearisation point that converges.
+  // We do NOT requeue the dropped factors: replaying them would just
+  // reproduce the same failure. The graph loses one tick of constraints
+  // but the prior chain of between-factors keeps the trajectory anchored.
+  ++isam_update_attempts_;
+  try
+  {
+    isam_.update(fg, values);
+  }
+  catch (const gtsam::IndeterminantLinearSystemException& ex)
+  {
+    ++isam_update_failures_;
+    (void) ex;
+    // No rclcpp dep here — log via stderr; the launch system pipes it
+    // into the docker logs / /rosout via stdout-logging mode.
+    std::fprintf(stderr,
+                 "[fusion_graph] iSAM2 update IndeterminantLinearSystemException "
+                 "(attempts=%llu failures=%llu, dropped batch with %zu factors / %zu values): "
+                 "skipping batch to keep node alive\n",
+                 static_cast<unsigned long long>(isam_update_attempts_),
+                 static_cast<unsigned long long>(isam_update_failures_),
+                 fg.size(),
+                 values.size());
+    return;  // skip rebase mirror — the batch never landed
+  }
+  catch (const std::exception& ex)
+  {
+    ++isam_update_failures_;
+    std::fprintf(stderr,
+                 "[fusion_graph] iSAM2 update threw std::exception "
+                 "(attempts=%llu failures=%llu): %s — skipping batch\n",
+                 static_cast<unsigned long long>(isam_update_attempts_),
+                 static_cast<unsigned long long>(isam_update_failures_),
+                 ex.what());
+    return;
+  }
   if (rebase_in_progress_)
   {
     // Mirror everything onto the pending buffer so phase 3 of the
@@ -1209,7 +1293,7 @@ bool GraphManager::Load(const std::string& prefix)
                                             key_value.value.cast<gtsam::Pose2>(),
                                             pin_noise));
   }
-  isam_.update(fg, loaded_values);
+  ApplyIsamUpdateLocked(fg, loaded_values);
   estimate_dirty_ = true;
 
   scans_ = std::move(loaded_scans);

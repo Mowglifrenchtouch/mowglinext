@@ -308,6 +308,11 @@ struct GraphStats
   // is the count of stationary samples that have contributed.
   double gyro_bias_z = 0.0;
   uint64_t gyro_bias_updates = 0;
+  // iSAM2 update attempts / caught failures. Non-zero failures means
+  // the graph caught a numerical ill-condition and skipped one batch
+  // to keep the node alive — see ApplyIsamUpdateLocked.
+  uint64_t isam_update_attempts = 0;
+  uint64_t isam_update_failures = 0;
 };
 
 class GraphManager
@@ -583,6 +588,12 @@ private:
   // the diagnostics + odom outputs.
   int ticks_since_cov_ = 0;
   std::vector<std::pair<uint64_t, uint64_t>> loop_closure_edges_;
+
+  // iSAM2 update attempt / failure counters. Failures are caught by
+  // ApplyIsamUpdateLocked so a single bad batch does not crash the
+  // node — see the comment there for the rationale.
+  uint64_t isam_update_attempts_ = 0;
+  uint64_t isam_update_failures_ = 0;
 
   // Health counters surfaced via Stats(). All bumps go through the
   // Record*() mutators below so mu_ wraps them — Stats() makes a
