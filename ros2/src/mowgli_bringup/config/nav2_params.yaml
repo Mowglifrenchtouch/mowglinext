@@ -741,54 +741,26 @@ docking_server:
     # so disabling the docking-internal check doesn't remove safety —
     # it just stops the docking server from refusing to dock at the dock.
     controller.use_collision_detection: false
-    # Graceful-controller velocity envelope. Defaults (v_linear_max ≈ 0.25
-    # m/s, slowdown_radius ≈ 0.25 m) are tuned for larger AMRs and let
-    # the mower hit the dock at near-transit speed: with docking_threshold
-    # 0.05 m the controller only has ~200 ms between "in tolerance" and
-    # contact, so the robot regularly overshoots / bounces off / misses
-    # the cradle. Halving v_linear_max and doubling slowdown_radius gives
-    # a calm ~5 cm/s final approach with plenty of braking distance for
-    # the 10 Hz controller loop to detect charging and stop cleanly.
-    # v_linear_min raised to 0.16 to stay above the host clamp
-    # (hardware_bridge on_cmd_vel zeroes |vx|<0.15). v_linear_max
-    # raised to 0.22 so the graceful controller has a > min envelope
-    # (the old 0.13/0.12 pair was an off-by-one: min > max made the
-    # controller saturate or refuse motion, which is what caused the
-    # 2026-05-19 sim "Failed to make progress" DockRobot timeout after
-    # 3 min of no motion). Even at the new 0.22 max the dock landing
-    # is soft: slowdown_radius=0.5 m gives the 20 Hz loop ample time
-    # to brake against docking_threshold=0.05 m.
+    # Graceful-controller envelope — kept close to Nav2 upstream defaults
+    # now that the host-side wz floor (hardware_bridge
+    # min_ang_vel_rad_per_s=0.5) and the sub-deadband vx clamp handle
+    # the chassis-side deadband cleanly. Earlier iterations of this file
+    # bumped k_phi/k_delta 3×, dropped v_linear_max, doubled
+    # slowdown_radius and raised v_angular_max — each fix worked around
+    # the symptom of a different deadband problem, but the combination
+    # made the final dock approach oscillate between "rotate only" and
+    # "translate only" at 20 Hz and never seat the cradle (measured
+    # 2026-05-27 as cmd_vel ping-ponging `x=-0.015 z=0` ↔ `x=0 z=-0.8`).
+    # Reset to upstream defaults except:
+    #   v_linear_min: 0.16 stays — hardware_bridge zeros |vx|<0.15.
+    #   beta/lambda: leave at upstream (0.4 / 2.0) — graceful control-law
+    #     shape, not deadband-related.
     controller.v_linear_min: 0.16
-    controller.v_linear_max: 0.22
-    # v_angular_max 0.5 → 0.8: gives the graceful controller more headroom
-    # above the chassis pivot deadband (~0.6 rad/s on PWM 40). With 0.5
-    # the controller routinely capped at sub-deadband output during the
-    # rotate-to-dock phase, leaving the robot stalled in place even when
-    # heading error called for full rotation. 0.8 keeps approach commands
-    # safely commandable while staying under controller.rotate_to_heading_
-    # angular_vel (1.0 rad/s) so the dedicated pivot phase stays the
-    # fastest mode.
-    controller.v_angular_max: 0.8
-    controller.slowdown_radius: 0.5
-    # Graceful controller gains. Default upstream is k_phi=3, k_delta=2.
-    # Earlier this repo bumped them 3× (10/5) to punch sub-deadband
-    # commands through the firmware's PWM 40 pivot floor — without the
-    # bump the graceful output sat at cmd_vel.angular.z ≈ 0.05 rad/s and
-    # the firmware silently dropped every tick. The 3× boost worked for
-    # the approach phase but caused alternating rotation/translation
-    # oscillation on the final 1 m: at each tick the controller would
-    # over-rotate, snap back to "translate only" mode, drift, then
-    # over-rotate again — measured 2026-05-27 as cmd_vel ping-ponging
-    # between `x=-0.015 z=0` and `x=0 z=-0.8` at 20 Hz, with displacement=0
-    # and dock_approach_timeout firing after 30 s.
-    #
-    # The host-side wz floor (hardware_bridge min_ang_vel_rad_per_s=0.5)
-    # now boosts sub-deadband angular commands to the chassis pivot
-    # deadband, so we no longer need the upstream gain hack. 5/3 keeps a
-    # moderate margin over defaults — defaults were also reported to make
-    # the controller lazy near goal — without the overshoot of 10/5.
-    controller.k_phi: 5.0
-    controller.k_delta: 3.0
+    controller.v_linear_max: 0.25
+    controller.v_angular_max: 0.75
+    controller.slowdown_radius: 0.25
+    controller.k_phi: 3.0
+    controller.k_delta: 2.0
     # Named dock instances — BT uses dock_id="home_dock"
     dock_plugins: ["simple_charging_dock"]
     docks: ["home_dock"]

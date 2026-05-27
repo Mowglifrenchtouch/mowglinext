@@ -450,15 +450,14 @@ docking_server:
     # nav2_params.yaml and stays above the clamp's strict-less-than
     # boundary.
     controller.use_collision_detection: false
-    controller.v_linear_min: 0.16    # match nav2_params.yaml — ≥ host clamp 0.15
-    controller.v_linear_max: 0.22    # match nav2_params.yaml — must be > min
-    # See nav2_params.yaml for the chassis-pivot-deadband rationale.
-    controller.v_angular_max: 0.8
-    controller.slowdown_radius: 0.5
-    # Halved from 10/5 once the host-side wz floor took over the deadband
-    # punch-through — see nav2_params.yaml for rationale.
-    controller.k_phi: 5.0
-    controller.k_delta: 3.0
+    # Match nav2_params.yaml — upstream defaults except v_linear_min
+    # (stays at 0.16 for the host clamp at 0.15).
+    controller.v_linear_min: 0.16
+    controller.v_linear_max: 0.25
+    controller.v_angular_max: 0.75
+    controller.slowdown_radius: 0.25
+    controller.k_phi: 3.0
+    controller.k_delta: 2.0
     dock_plugins: ["simple_charging_dock"]
     docks: ["home_dock"]
     home_dock:
