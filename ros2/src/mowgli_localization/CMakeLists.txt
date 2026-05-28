@@ -109,6 +109,8 @@ add_executable(cog_to_imu
   src/cog_to_imu_node.cpp
 )
 
+target_include_directories(cog_to_imu PUBLIC ${INCLUDE_DIR})
+
 ament_target_dependencies(cog_to_imu
   rclcpp
   nav_msgs
@@ -244,6 +246,17 @@ if(BUILD_TESTING)
   )
 
   target_include_directories(test_wheel_odometry PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  )
+
+  # ---- test_cog_yaw_math ----
+  # Pure C++ test of the COG-to-body-heading algebra (cog_yaw_math.hpp).
+  # Guards the 2026-05-27 reverse+rotate yaw fix — no ROS2 deps, link gtest.
+  ament_add_gtest(test_cog_yaw_math
+    test/test_cog_yaw_math.cpp
+  )
+
+  target_include_directories(test_cog_yaw_math PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
   )
 

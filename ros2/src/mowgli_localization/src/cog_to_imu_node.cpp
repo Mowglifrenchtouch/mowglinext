@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "geometry_msgs/msg/quaternion.hpp"
+#include "mowgli_localization/cog_yaw_math.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/qos.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -383,46 +384,40 @@ private:
       return;
     }
 
-    double base_yaw;
     if (wheel_sign > 0)
     {
-      base_yaw = std::atan2(dy, dx);
       ++published_fwd_;
     }
     else
     {
-      base_yaw = std::atan2(-dy, -dx);
       ++published_rev_;
     }
 
     // ── Unbias the COG against constant-rate turning ─────────────────
-    // The antenna sits at r_lever in body frame, so its velocity is
-    //   v_ant_body = (v_x - ω·r_y, ω·r_x)
-    // and its world-frame velocity angle is
-    //   ψ_body + atan2(ω·r_x, v_x - ω·r_y)        (forward motion)
-    //   ψ_body + π - atan2(ω·r_x, |v_x| + ω·r_y)  (reverse motion)
-    // The displacement vector points along the *midpoint* yaw of the
-    // baseline (ψ_anchor + ω·dt/2), not the current yaw. Subtract both
-    // corrections to recover the heading at the current sample.
+    // The antenna sits at r_lever in body frame, so its body-frame
+    // velocity is (v_x - ω·r_y, ω·r_x) with SIGNED v_x. The GPS
+    // displacement points along the antenna's world-frame velocity at
+    // the baseline *midpoint* (ψ_anchor + ω·dt/2), not the current yaw,
+    // so we subtract the lever-arm offset AND add the half-baseline drift
+    // to recover the heading at the current sample.
+    //
+    // The lever-arm offset is direction-dependent: forward it is a small
+    // first-quadrant angle, but in REVERSE the antenna body-x velocity is
+    // negative so the offset lands near ±π — applying the forward-form
+    // correction in reverse left the published COG yaw ~73° off the gyro
+    // during the 2026-05-27 reverse+rotate teleop and fought the gyro
+    // between-factor in fusion_graph. compute_cog_body_yaw() handles both
+    // cases (signed v_x) — see cog_yaw_math.hpp. Forward path unchanged.
     //
     // Time-averaged ω is approximated by the latest gyro/wheel rate;
     // the resulting model error is folded into σ_yaw via omega_noise_rps_.
     const double omega_avg = 0.5 * (wheel_omega_.load() + gyro_z_.load());
     const double dt_baseline = std::max(t - anchor_t_, 1e-3);
     const double v_eff = std::max(std::abs(wheel_vx_.load()), min_abs_wheel_);
+    const double vx_signed = wheel_vx_.load();
 
-    const double drift_corr = omega_avg * dt_baseline * 0.5;
-    // Forward:  body-x antenna velocity =  v_eff - ω·r_y
-    //           body-y antenna velocity =  ω·r_x
-    // Reverse:  body-x antenna velocity = -v_eff - ω·r_y  (still negative)
-    //           body-y antenna velocity =  ω·r_x
-    // Either way, since base_yaw was derived in the "body-forward" sense
-    // (atan2(-dy,-dx) for reverse), we apply the same forward-form bias.
-    const double lever_corr =
-        std::atan2(omega_avg * lever_arm_x_, v_eff - omega_avg * lever_arm_y_);
-
-    double yaw = base_yaw + drift_corr - lever_corr;
-    yaw = std::atan2(std::sin(yaw), std::cos(yaw));
+    const double yaw = compute_cog_body_yaw(
+        dx, dy, wheel_sign, omega_avg, dt_baseline, vx_signed, lever_arm_x_, lever_arm_y_);
 
     // ── σ_yaw composition ────────────────────────────────────────────
     // 1. Positional noise → angular noise across the baseline (existing).
@@ -437,13 +432,10 @@ private:
     const double sigma_pos = std::hypot(pos_acc, anchor_pa_);
     const double sigma_pos_yaw = std::atan2(2.0 * sigma_pos, std::max(displacement, 1e-3));
     const double sigma_drift = 0.5 * dt_baseline * omega_noise_rps_;
-    const double denom_lever =
-        std::pow(v_eff - omega_avg * lever_arm_y_, 2.0) + std::pow(omega_avg * lever_arm_x_, 2.0);
-    const double dlever_domega =
-        (lever_arm_x_ * (v_eff - omega_avg * lever_arm_y_) +
-         omega_avg * lever_arm_x_ * lever_arm_y_) /
-        std::max(denom_lever, 1e-6);
-    const double sigma_lever = std::abs(dlever_domega) * omega_noise_rps_;
+    // |∂lever/∂ω| is symmetric in v_x sign, so the same magnitude inflates
+    // σ_yaw forward and reverse (uses |v_x| via v_eff).
+    const double sigma_lever =
+        compute_lever_sigma(omega_avg, v_eff, lever_arm_x_, lever_arm_y_, omega_noise_rps_);
     const double sigma_yaw_sq = sigma_pos_yaw * sigma_pos_yaw + sigma_drift * sigma_drift +
                                 sigma_lever * sigma_lever;
     const double yaw_var = std::max(min_yaw_var_, std::min(sigma_yaw_sq, max_yaw_var_));
