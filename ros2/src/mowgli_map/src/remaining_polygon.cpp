@@ -117,36 +117,83 @@ void MapServerNode::on_get_remaining_area_polygon(
     return;
   }
 
-  // 1. Build the original polygon as outer ring + original obstacles as holes.
+  // 1. Build the original polygon. Outer ring = mowing area; interior
+  //    exclusions (operator obstacles + dock body) are punched out.
+  //
+  //    CRITICAL: an exclusion is added as a HOLE only when it lies strictly
+  //    inside the area. When it touches/crosses the boundary (the dock sits
+  //    on the lawn edge in the common install) it is instead SUBTRACTED from
+  //    the outer ring to carve a clean notch. A hole that touches the outer
+  //    boundary makes the polygon non-simple, and F2C's GEOS-backed
+  //    TrapezoidalDecomp throws on it (caught as INTERNAL_F2C_ERROR /
+  //    code=6) — which silently dropped the entire dock-side chunk of the
+  //    area, leaving ~half of it unmowed (field 2026-05-29). Notching keeps
+  //    the geometry simple so F2C can plan the whole area.
+  //    The corridor is intentionally NOT subtracted: it stays mowable so the
+  //    robot can drive across it on the way home (DOCKING_AREA keepout only).
   BgPolygon original = to_bg_polygon(area.polygon);
+
+  auto punch_exclusion = [&](BgPolygon excl) {
+    bg::correct(excl);
+    if (excl.outer().empty())
+    {
+      return;
+    }
+    BgPolygon outer_only;
+    outer_only.outer() = original.outer();
+    bg::correct(outer_only);
+
+    BgMultiPolygon overlap;
+    bg::intersection(excl, outer_only, overlap);
+    if (overlap.empty() || bg::area(overlap) < 1e-6)
+    {
+      return;  // exclusion lies outside the area — nothing to remove
+    }
+
+    if (bg::within(excl, outer_only))
+    {
+      // Strictly interior — a clean hole.
+      original.inners().emplace_back(excl.outer().begin(), excl.outer().end());
+      return;
+    }
+
+    // Touches/crosses the boundary — subtract to carve a notch so the
+    // result stays a simple polygon (no boundary-touching hole).
+    BgMultiPolygon notched;
+    bg::difference(outer_only, excl, notched);
+    if (notched.empty())
+    {
+      return;  // exclusion covers the whole area — leave original as-is
+    }
+    const BgPolygon* best = &notched[0];
+    for (size_t ni = 1; ni < notched.size(); ++ni)
+    {
+      if (bg::area(notched[ni]) > bg::area(*best))
+      {
+        best = &notched[ni];
+      }
+    }
+    // Replace the outer ring with the notched one, preserving any holes
+    // already punched (operator obstacles processed earlier).
+    auto saved_inners = original.inners();
+    original = *best;
+    for (auto& ir : saved_inners)
+    {
+      original.inners().push_back(std::move(ir));
+    }
+  };
+
   for (const auto& obstacle : area.obstacles)
   {
     if (obstacle.points.size() < 3)
     {
       continue;
     }
-    BgPolygon obs = to_bg_polygon(obstacle);
-    if (obs.outer().empty())
-    {
-      continue;
-    }
-    original.inners().emplace_back(obs.outer().begin(), obs.outer().end());
+    punch_exclusion(to_bg_polygon(obstacle));
   }
-  // Dock body lives on the CLASSIFICATION layer (OBSTACLE_PERMANENT) but
-  // remaining_polygon only reads MOW_PROGRESS — so without this hole the
-  // F2C planner happily lays swaths over the dock structure. Inject the
-  // dock body polygon as an inner ring so the area = mowable_outer minus
-  // (operator obstacles ∪ dock body). The corridor is intentionally NOT
-  // subtracted: it stays mowable so the robot can drive across it on the
-  // way home, just classified as DOCKING_AREA for the keepout carve-out.
   if (has_dock_exclusion_ && dock_body_polygon_.points.size() >= 3)
   {
-    BgPolygon dock_body_bg = to_bg_polygon(dock_body_polygon_);
-    if (!dock_body_bg.outer().empty())
-    {
-      original.inners().emplace_back(dock_body_bg.outer().begin(),
-                                     dock_body_bg.outer().end());
-    }
+    punch_exclusion(to_bg_polygon(dock_body_polygon_));
   }
   bg::correct(original);
 
@@ -186,13 +233,32 @@ void MapServerNode::on_get_remaining_area_polygon(
 
   if (mowed.empty())
   {
-    // Nothing mowed yet: return the area unchanged as a single piece.
+    // Nothing mowed yet: return the whole area as a single piece — but use
+    // the punched `original` (dock notch/hole + operator obstacles applied
+    // above), NOT the raw area.polygon, so the very first plan already
+    // excludes the dock and stays a simple polygon F2C can handle.
     mowgli_interfaces::msg::MapArea piece;
     piece.name = area.name + "_remaining_0";
-    piece.area = area.polygon;
-    piece.obstacles = area.obstacles;
+    BgPolygon simple_orig;
+    bg::simplify(original, simple_orig, 0.02);
+    if (simple_orig.outer().size() < 4)
+    {
+      simple_orig = original;
+    }
+    piece.area = to_ros_polygon(simple_orig.outer());
+    for (const auto& inner : simple_orig.inners())
+    {
+      if (inner.size() < 4)
+      {
+        continue;
+      }
+      piece.obstacles.push_back(to_ros_polygon(inner));
+    }
     piece.is_navigation_area = false;
-    res->pieces.push_back(piece);
+    if (piece.area.points.size() >= 3)
+    {
+      res->pieces.push_back(piece);
+    }
     res->success = true;
     return;
   }
@@ -278,11 +344,23 @@ void MapServerNode::on_get_remaining_area_polygon(
       continue;
     }
 
+    // Collapse the 0.05 m staircase the mow_progress difference leaves on
+    // the boundary (400-600 near-collinear vertices) into a clean ring.
+    // 0.02 m tolerance is well under one cell so the real shape is kept;
+    // a denser ring inflates F2C planning cost and risks GEOS degeneracies.
+    // Fall back to the raw piece if simplification collapses it.
+    BgPolygon simple_piece;
+    bg::simplify(bg_piece, simple_piece, 0.02);
+    if (simple_piece.outer().size() < 4)
+    {
+      simple_piece = bg_piece;
+    }
+
     mowgli_interfaces::msg::MapArea piece;
     piece.name = area.name + "_remaining_" + std::to_string(res->pieces.size());
-    piece.area = to_ros_polygon(bg_piece.outer());
+    piece.area = to_ros_polygon(simple_piece.outer());
     piece.is_navigation_area = false;
-    for (const auto& inner : bg_piece.inners())
+    for (const auto& inner : simple_piece.inners())
     {
       if (inner.size() < 4)
       {
