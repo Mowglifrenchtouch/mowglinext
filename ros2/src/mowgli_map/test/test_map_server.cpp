@@ -1026,10 +1026,10 @@ TEST_F(SegmentSelectorTest, SegmentStopsAtObstacle)
   }
   auto o = call_selector(*node_, -1.5, 0.0);
   EXPECT_TRUE(o.ok);
-  EXPECT_EQ(o.reason, "obstacle");
   // The mid-row bypass arc (added alongside these tests) routes around the
   // obstacle and resumes the row on the far side, so the segment now ends
-  // PAST the obstacle (x ~ 1.1), not short of it. The dedicated
+  // PAST the obstacle (x ~ 1.1), not short of it — and its termination
+  // reason is the row end / boundary, no longer "obstacle". The dedicated
   // Bypasses* tests pin the bypass geometry itself.
   EXPECT_GT(o.end_x, 1.0);
 }
@@ -1273,10 +1273,10 @@ TEST_F(CoverageCellScenarioTest, MidRowObstacleStopsThenResumesAfterClear)
 
   auto stop = select(-1.5, 0.0);
   EXPECT_TRUE(stop.ok);
-  EXPECT_EQ(stop.reason, "obstacle");
   // The bypass arc detours around the temporary obstacle and resumes the
   // row past it (end_x ~ 1.0), emitting bypass via points — it no longer
-  // hard-stops short of the obstacle.
+  // hard-stops short of the obstacle, so the termination reason is the row
+  // end / boundary rather than "obstacle".
   EXPECT_FALSE(stop.via_points.empty());
   EXPECT_GT(stop.end_x, 0.5);
 
