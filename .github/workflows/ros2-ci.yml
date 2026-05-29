@@ -181,10 +181,16 @@ jobs:
           source /opt/ros/${{ matrix.ros_distro }}/setup.bash
           sudo apt-get update
           rosdep update --rosdistro ${{ matrix.ros_distro }}
+          # skip-keys: the opennav_coverage server subpackages are
+          # COLCON_IGNORE'd (only _msgs is used), but mowgli_bringup still
+          # exec_depends on opennav_coverage — rosdep can't resolve a key for
+          # a package it now skips, so tell it not to try. Real missing deps
+          # still fail the step (unlike the Dockerfile's `|| true`).
           rosdep install \
             --from-paths src \
             --ignore-src \
             --rosdistro ${{ matrix.ros_distro }} \
+            --skip-keys "opennav_coverage opennav_coverage_bt opennav_coverage_demo opennav_coverage_navigator opennav_row_coverage" \
             -y
 
       - name: Cache colcon workspace
