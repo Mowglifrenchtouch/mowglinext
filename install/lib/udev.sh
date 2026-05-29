@@ -128,14 +128,14 @@ build_dynamic_udev_rules() {
       emit_by_id_udev_rule "$GPS_BY_ID" "gps"
     elif [ "${HARDWARE_BACKEND:-mowgli}" != "mavros" ]; then
       case "$gnss_backend" in
-        gps|ublox)
+        gps)
           if [[ "$gps_protocol" != "NMEA" ]]; then
             by_id_path="$(find_serial_by_id "*u-blox*" "*ublox*" || true)"
           else
             by_id_path=""
           fi
           ;;
-        unicore)
+        ublox|unicore)
           by_id_path=""
           ;;
         *)

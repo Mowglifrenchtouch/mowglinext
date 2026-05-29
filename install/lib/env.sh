@@ -16,7 +16,27 @@ setup_env() {
   step "Environment (.env)"
 
   local env_file="$REPO_DIR/docker/.env"
+  local existing_yaml="$DOCKER_DIR/config/mowgli/mowgli_robot.yaml"
   mkdir -p "$REPO_DIR/docker"
+
+  yaml_env_seed() {
+    local key="${1:?yaml_env_seed: missing key}"
+    local line value
+
+    [ -f "$existing_yaml" ] || return 1
+
+    line="$(grep -m1 -E "^[[:space:]]+${key}:" "$existing_yaml" 2>/dev/null || true)"
+    [ -n "$line" ] || return 1
+
+    value="${line#*:}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%%#*}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value#\"}"
+    value="${value%\"}"
+    [ -n "$value" ] || return 1
+    printf '%s\n' "$value"
+  }
 
   : "${ROS_DOMAIN_ID:=0}"
   : "${MOWER_IP:=10.0.0.161}"
@@ -24,13 +44,14 @@ setup_env() {
   : "${ENABLE_FOXGLOVE:=true}"
 
   # Main GNSS receiver
-  # GPS_BAUD is the runtime baud for the main GNSS receiver exposed as /dev/gps.
-  # GPS_BY_ID, GPS_UART_DEVICE, and UNICORE_COM_PORT are installer/support
-  # variables kept for compatibility and installer re-runs; they do not model
-  # separate runtime GPS devices.
+  # GPS_PORT is the canonical runtime device path handed to compose/runtime.
+  # For USB receivers the installer normalizes it to the selected
+  # /dev/serial/by-id/... symlink; for UART it remains /dev/gps backed by a
+  # udev rule. GPS_BY_ID, GPS_UART_DEVICE, and UNICORE_COM_PORT are installer
+  # support variables kept for reruns and diagnostics.
   #
-  # Dedicated GNSS_BACKEND=ublox uses the vendor USB/libusb driver and selects
-  # the receiver via UBLOX_DEVICE_SERIAL_STRING instead of /dev/gps.
+  # UBLOX_DEVICE_SERIAL_STRING is retained only for compatibility with older
+  # docker/.env generations that predate the unified GPS_PORT contract.
   : "${GNSS_BACKEND:=gps}"
   : "${GPS_CONNECTION:=uart}"
   : "${GPS_PROTOCOL:=UBX}"
@@ -38,6 +59,7 @@ setup_env() {
   : "${GPS_BY_ID:=}"
   : "${GPS_UART_DEVICE:=/dev/ttyAMA4}"
   : "${GPS_BAUD:=921600}"
+  : "${GPS_FRAME_ID:=gps_link}"
   : "${UBLOX_DEVICE_FAMILY:=F9P}"
   : "${UBLOX_DEVICE_SERIAL_STRING:=}"
 
@@ -78,6 +100,13 @@ setup_env() {
   : "${UNICORE_USE_BINARY_RAW_OBSERVATIONS:=false}"
   : "${UNICORE_ROS_PACKAGE:=unicore_gnss}"
   : "${UNICORE_ROS_EXECUTABLE:=unicore_node}"
+  if [ -z "${UNICORE_AUTO_CONFIGURE+x}" ] || [ -z "${UNICORE_AUTO_CONFIGURE}" ]; then
+    UNICORE_AUTO_CONFIGURE="$(yaml_env_seed unicore_auto_configure || true)"
+  fi
+  : "${UNICORE_AUTO_CONFIGURE:=true}"
+  : "${UNICORE_FIRST_RUN_RESET:=false}"
+  : "${UNICORE_RESET_MARKER_PATH:=/state/unicore-first-run-reset.done}"
+  : "${UNICORE_RESET_COMMAND:=FRESET}"
 
   # LiDAR
   : "${LIDAR_ENABLED:=true}"
@@ -143,9 +172,34 @@ setup_env() {
     warn_legacy_nmea_backend_once
     GNSS_BACKEND="gps"
     GPS_PROTOCOL="NMEA"
+  elif [[ "${GNSS_BACKEND:-gps}" == "gps" && "${GPS_PROTOCOL:-}" == "UNICORE" ]]; then
+    GNSS_BACKEND="unicore"
   elif ! is_supported_gnss_backend "${GNSS_BACKEND:-gps}"; then
     warn "Unknown GNSS_BACKEND=${GNSS_BACKEND:-unset} — defaulting to gps"
     GNSS_BACKEND="gps"
+  fi
+
+  if [[ "${GPS_CONNECTION:-}" == "usb" && -z "${GPS_BY_ID:-}" && "${GPS_PORT:-}" =~ ^/dev/serial/by-id/ ]]; then
+    GPS_BY_ID="$GPS_PORT"
+  fi
+
+  if [[ "${GPS_CONNECTION:-}" == "usb" && -n "${GPS_BY_ID:-}" ]]; then
+    GPS_PORT="$GPS_BY_ID"
+  fi
+
+  if [[ "${GNSS_BACKEND:-}" == "ublox" ]]; then
+    GPS_CONNECTION="usb"
+    GPS_PROTOCOL="UBX"
+    if [[ -z "${GPS_BY_ID:-}" && "${UBLOX_DEVICE_SERIAL_STRING:-}" =~ ^/dev/serial/by-id/ ]]; then
+      GPS_BY_ID="$UBLOX_DEVICE_SERIAL_STRING"
+      GPS_PORT="$UBLOX_DEVICE_SERIAL_STRING"
+    fi
+  elif [[ "${GNSS_BACKEND:-}" == "unicore" ]]; then
+    : "${GPS_CONNECTION:=usb}"
+    GPS_PROTOCOL="UNICORE"
+    if [[ "${GPS_CONNECTION}" == "usb" && -n "${GPS_BY_ID:-}" ]]; then
+      GPS_PORT="$GPS_BY_ID"
+    fi
   fi
 
   local enable_mavros="false"
@@ -169,6 +223,7 @@ setup_env() {
   upsert_env_key "$env_file" "GPS_BY_ID" "$GPS_BY_ID"
   upsert_env_key "$env_file" "GPS_UART_DEVICE" "$GPS_UART_DEVICE"
   upsert_env_key "$env_file" "GPS_BAUD" "$GPS_BAUD"
+  upsert_env_key "$env_file" "GPS_FRAME_ID" "$GPS_FRAME_ID"
   upsert_env_key "$env_file" "UBLOX_DEVICE_FAMILY" "$UBLOX_DEVICE_FAMILY"
   upsert_env_key "$env_file" "UBLOX_DEVICE_SERIAL_STRING" "$UBLOX_DEVICE_SERIAL_STRING"
   upsert_env_key "$env_file" "GPS_DEBUG_ENABLED" "$GPS_DEBUG_ENABLED"
@@ -204,6 +259,10 @@ setup_env() {
   upsert_env_key "$env_file" "UNICORE_USE_BINARY_RAW_OBSERVATIONS" "$UNICORE_USE_BINARY_RAW_OBSERVATIONS"
   upsert_env_key "$env_file" "UNICORE_ROS_PACKAGE" "$UNICORE_ROS_PACKAGE"
   upsert_env_key "$env_file" "UNICORE_ROS_EXECUTABLE" "$UNICORE_ROS_EXECUTABLE"
+  upsert_env_key "$env_file" "UNICORE_AUTO_CONFIGURE" "$UNICORE_AUTO_CONFIGURE"
+  upsert_env_key "$env_file" "UNICORE_FIRST_RUN_RESET" "$UNICORE_FIRST_RUN_RESET"
+  upsert_env_key "$env_file" "UNICORE_RESET_MARKER_PATH" "$UNICORE_RESET_MARKER_PATH"
+  upsert_env_key "$env_file" "UNICORE_RESET_COMMAND" "$UNICORE_RESET_COMMAND"
 
   upsert_env_key "$env_file" "LIDAR_ENABLED" "$LIDAR_ENABLED"
   upsert_env_key "$env_file" "LIDAR_TYPE" "$LIDAR_TYPE"

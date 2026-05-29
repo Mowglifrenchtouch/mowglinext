@@ -81,6 +81,17 @@ configure_gps() {
     GPS_PROTOCOL="NMEA"
   fi
 
+  # Migrate older generic/unicore mixes onto the dedicated backend contract.
+  if [[ "${GNSS_BACKEND:-}" == "gps" && "${GPS_PROTOCOL:-}" == "UNICORE" ]]; then
+    GNSS_BACKEND="unicore"
+  fi
+  if [[ "${GNSS_BACKEND:-}" == "unicore" ]]; then
+    : "${GPS_CONNECTION:=usb}"
+    GPS_PROTOCOL="UNICORE"
+  elif [[ "${GNSS_BACKEND:-}" == "ublox" ]]; then
+    GPS_PROTOCOL="UBX"
+  fi
+
   if [[ "${PRESET_LOADED:-false}" == "true" ]]; then
     if [ "${STATE_ACTIVE_PRESET_COUNT:-0}" -gt 0 ]; then
       preset_key_loaded GNSS_BACKEND && gnss_preconfigured=true
@@ -120,9 +131,14 @@ configure_gps() {
     : "${GPS_PORT:=/dev/gps}"
     : "${GPS_BY_ID:=}"
     : "${UBLOX_DEVICE_SERIAL_STRING:=}"
+    : "${GPS_FRAME_ID:=gps_link}"
     : "${GPS_DEBUG_ENABLED:=false}"
     : "${GPS_DEBUG_PORT:=/dev/gps_debug}"
     : "${GPS_DEBUG_BAUD:=115200}"
+
+    if [[ "${GPS_CONNECTION}" == "usb" && -z "${GPS_BY_ID:-}" && "${GPS_PORT:-}" =~ ^/dev/serial/by-id/ ]]; then
+      GPS_BY_ID="${GPS_PORT}"
+    fi
 
     # For USB connections, prefer the by-id symlink as GPS_PORT — it's always
     # created by systemd-udev and is what start_gps.sh expects via
@@ -153,11 +169,13 @@ configure_gps() {
         error "GPS_BY_ID is required for GNSS_BACKEND=ublox (USB by-id path to the F9P)."
         return 1
       fi
-    fi
-
-    if [[ "${GNSS_BACKEND}" == "unicore" && "${GPS_CONNECTION}" == "usb" && -z "${GPS_BY_ID:-}" ]]; then
-      error "GPS_BY_ID is required for GNSS_BACKEND=unicore with GPS_CONNECTION=usb"
-      return 1
+    elif [[ "${GNSS_BACKEND}" == "unicore" ]]; then
+      : "${GPS_CONNECTION:=usb}"
+      GPS_PROTOCOL="UNICORE"
+      if [[ "${GPS_CONNECTION}" == "usb" && -z "${GPS_BY_ID:-}" ]]; then
+        error "GPS_BY_ID is required for GNSS_BACKEND=unicore with GPS_CONNECTION=usb"
+        return 1
+      fi
     fi
 
     info "GNSS backend pre-configured: ${GNSS_BACKEND}"
@@ -200,10 +218,15 @@ configure_gps() {
     else
       echo ""
       echo "Select GNSS backend:"
-      echo "  1) Generic GPS (legacy container, UBX or NMEA)"
-      echo "  2) u-blox (F9P, UBX HP + NTRIP bundled)"
-      echo "  3) Unicore (UM98x)"
-      prompt "$MSG_CHOICE" "1"
+      echo "  1) Generic / Legacy NMEA receiver"
+      echo "  2) u-blox"
+      echo "  3) Unicore UM98x/UM96x"
+      local gnss_default_choice="1"
+      case "${GNSS_BACKEND:-gps}" in
+        ublox) gnss_default_choice="2" ;;
+        unicore) gnss_default_choice="3" ;;
+      esac
+      prompt "$MSG_CHOICE" "$gnss_default_choice"
       local gnss_choice="$REPLY"
 
       case "$gnss_choice" in
@@ -224,10 +247,10 @@ configure_gps() {
     fi
 
     # Defaults based on PCB / GUI-ready
-    : "${GPS_PROTOCOL:=UBX}"
     : "${GPS_CONNECTION:=uart}"
     : "${GPS_PORT:=/dev/gps}"
     : "${GPS_UART_DEVICE:=/dev/ttyAMA4}"
+    : "${GPS_FRAME_ID:=gps_link}"
     : "${UBLOX_DEVICE_SERIAL_STRING:=}"
     # GPS_BAUD is the single runtime baud target for the main GNSS receiver.
     : "${GPS_BAUD:=921600}"
@@ -254,12 +277,26 @@ configure_gps() {
       pick_serial_by_id "${GPS_BY_ID:-}" || return 1
       GPS_BY_ID="$REPLY"
       GPS_PORT="$GPS_BY_ID"
+    elif [[ "${GNSS_BACKEND}" == "unicore" ]]; then
+      GPS_CONNECTION="usb"
+      GPS_PROTOCOL="UNICORE"
+      GPS_UART_DEVICE=""
+      GPS_BAUD="921600"
+
+      echo ""
+      info "GNSS_BACKEND=unicore: dedicated Unicore UM98x/UM96x container over USB by-id."
+      pick_serial_by_id "${GPS_BY_ID:-}" || return 1
+      GPS_BY_ID="$REPLY"
+      GPS_PORT="$GPS_BY_ID"
     else
+      : "${GPS_PROTOCOL:=UBX}"
       echo ""
       echo "$MSG_GPS_CONNECTION"
       echo "  1) USB"
       echo "  2) UART"
-      prompt "$MSG_CHOICE" "2"
+      local conn_default_choice="2"
+      [[ "${GPS_CONNECTION:-uart}" == "usb" ]] && conn_default_choice="1"
+      prompt "$MSG_CHOICE" "$conn_default_choice"
       local conn_choice="$REPLY"
 
       case "$conn_choice" in
@@ -287,7 +324,9 @@ configure_gps() {
       echo "$MSG_GPS_PROTOCOL"
       echo "  1) UBX"
       echo "  2) NMEA"
-      prompt "$MSG_CHOICE" "1"
+      local proto_default_choice="1"
+      [[ "${GPS_PROTOCOL:-UBX}" == "NMEA" ]] && proto_default_choice="2"
+      prompt "$MSG_CHOICE" "$proto_default_choice"
       local proto_choice="$REPLY"
 
       case "$proto_choice" in
