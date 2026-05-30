@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -87,10 +88,32 @@ struct BTContext
 
   /// Areas already dispatched to PlanCoverageArea+FollowStrip in the
   /// current session. GetNextUnmowedArea skips any index in this set
-  /// when iterating, so each area gets at most one PlanCoverageArea
-  /// call per session — no replan loops, even if FollowStrip aborts or
-  /// only partially mows. Cleared by EndSession.
+  /// when iterating. An area is added here only after it is genuinely
+  /// exhausted — either because all swaths were mowed, or because the
+  /// per-area attempt counter (area_attempt_count) hit kMaxAreaAttempts.
+  /// Cleared by EndSession.
   std::set<uint32_t> attempted_areas;
+
+  /// Per-area count of CONSECUTIVE GetNextUnmowedArea dispatches that
+  /// made NO coverage progress. Reset to 0 whenever a dispatch shows the
+  /// area's coverage_percent advanced beyond the last dispatch (see
+  /// area_last_coverage). Only a genuinely stuck area — one that cannot
+  /// add any coverage across kMaxAreaAttempts successive passes — is
+  /// promoted into attempted_areas and skipped. Previously this counted
+  /// EVERY dispatch, so a progressing-but-stuttering area (each
+  /// FollowStrip abort at a hard obstacle costs a dispatch) gave up while
+  /// still climbing — observed 2026-05-29 as area 0 abandoned at 18.6 %
+  /// despite advancing 0.3 → 18.6 % across the 5 dispatches. Cleared by
+  /// EndSession.
+  std::map<uint32_t, uint32_t> area_attempt_count;
+  /// Best coverage_percent seen for an area so far this session, used to
+  /// decide whether a dispatch made progress (and thus resets the
+  /// no-progress attempt counter). Cleared by EndSession.
+  std::map<uint32_t, float> area_last_coverage;
+  static constexpr uint32_t kMaxAreaAttempts = 5;
+  /// Minimum coverage_percent gain that counts as progress (resets the
+  /// no-progress counter). Below this, a dispatch is treated as stuck.
+  static constexpr float kAreaProgressEpsilonPct = 0.5f;
 
   // -----------------------------------------------------------------------
   // Derived / convenience fields (computed from latest_* messages)

@@ -192,9 +192,18 @@ assert_eq "second run skips reset command" "" "$(printf '%s' "$COMMAND_LOG" | gr
 UNICORE_FIRST_RUN_RESET="false"
 rm -rf "$reset_marker_dir"
 
-run_scenario "Unknown model is rejected" "115200" "unknown" "115200" "1"
-assert_eq "Unknown model skips saveconfig" "" "$(printf '%s' "$COMMAND_LOG" | grep -F "SAVECONFIG" || true)"
-assert_eq "Unknown model skips signalgroup" "" "$(printf '%s' "$COMMAND_LOG" | grep -F "CONFIG SIGNALGROUP" || true)"
+# An unidentified model must NOT abort the whole config: SIGNALGROUP is the
+# only model-specific command, so the model-independent rover config still
+# applies and SAVECONFIG is still sent.
+run_scenario "Unknown model still applies base config" "921600" "unknown" "921600" "0"
+assert_contains "Unknown model applies MODE ROVER" "MODE ROVER" "$COMMAND_LOG"
+assert_contains "Unknown model still saves config" "SAVECONFIG" "$COMMAND_LOG"
+assert_eq "Unknown model skips signalgroup without override" "" "$(printf '%s' "$COMMAND_LOG" | grep -F "CONFIG SIGNALGROUP" || true)"
+
+UNICORE_SIGNALGROUP_OVERRIDE="CONFIG SIGNALGROUP 2"
+run_scenario "Unknown model honours signalgroup override" "921600" "unknown" "921600" "0"
+assert_contains "Override forces signalgroup despite unknown model" "CONFIG SIGNALGROUP 2" "$COMMAND_LOG"
+UNICORE_SIGNALGROUP_OVERRIDE=""
 
 reset_profile_env
 UNICORE_PROFILE="normal"

@@ -112,6 +112,7 @@ export interface MowgliReplaceMapReq {
 
 export interface MowgliSetDockingPointReq {
   docking_pose?: GeometryPose;
+  use_gps_position?: boolean;
 }
 
 export interface TypesFirmwareConfig {
@@ -120,6 +121,7 @@ export interface TypesFirmwareConfig {
   bothWheelsLiftEmergencyMillis?: number;
   branch?: string;
   debugType?: string;
+  directory?: string;
   disableEmergency?: boolean;
   externalImuAcceleration?: boolean;
   externalImuAngular?: boolean;

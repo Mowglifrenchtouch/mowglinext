@@ -2,7 +2,7 @@ import {useHighLevelStatus} from "../hooks/useHighLevelStatus.ts";
 import {useStatus} from "../hooks/useStatus.ts";
 import {useEmergency} from "../hooks/useEmergency.ts";
 import {usePower} from "../hooks/usePower.ts";
-import {useGPS} from "../hooks/useGPS.ts";
+import {useGnssStatus} from "../hooks/useGnssStatus.ts";
 import {useSettings} from "../hooks/useSettings.ts";
 import {computeBatteryPercent} from "../utils/battery.ts";
 import {deriveGpsStatus} from "../utils/gpsStatus.ts";
@@ -54,7 +54,7 @@ export const MowerStatus = () => {
     const hwStatus = useStatus();
     const emergencyData = useEmergency();
     const power = usePower();
-    const gps = useGPS();
+    const gnss = useGnssStatus();
     const {settings} = useSettings();
     const guiApi = useApi();
     const {notification} = App.useApp();
@@ -70,7 +70,7 @@ export const MowerStatus = () => {
         undefined
     );
 
-    const gpsStatus = deriveGpsStatus(gps.flags);
+    const gpsStatus = deriveGpsStatus(gnss);
     const gpsColor =
         gpsStatus.fixType === "RTK_FIX" ? colors.primary :
         gpsStatus.fixType === "RTK_FLOAT" ? colors.warning :
@@ -113,6 +113,7 @@ export const MowerStatus = () => {
     // dashboard hero card to clear it (issue #149).
     const mowerAction = useMowerAction();
     const resetEmergencyAction = mowerAction("emergency", {Emergency: 0});
+    const rebootBoardAction = mowerAction("reboot_board", {});
     const showResetEmergency =
         emergencyData.active_emergency || emergencyData.latched_emergency || isEmergency;
 
@@ -152,6 +153,15 @@ export const MowerStatus = () => {
             label: mowgliRestart.pending ? mowgliRestart.pendingLabel : "Restart Mowgli",
             disabled: mowgliRestart.pending,
             onClick: () => confirmAction("Restart Mowgli", "This will restart the MowgliNext container.", restartMowgli),
+        },
+        {
+            key: "reboot-board",
+            icon: <ReloadOutlined/>,
+            label: "Reboot Board (STM32)",
+            onClick: () => confirmAction(
+                "Reboot Board (STM32)",
+                "Resets the STM32 firmware (NVIC_SystemReset). Use to recover a wedged board — e.g. the IMU reporting NaN. Motors/blade stop during the ~1 s reset.",
+                rebootBoardAction),
         },
         {type: "divider"},
         {

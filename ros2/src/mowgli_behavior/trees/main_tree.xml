@@ -161,6 +161,7 @@
           <StopMoving/>
           <PublishHighLevelStatus state="2" state_name="CRITICAL_BATTERY_DOCKING"/>
           <SaveObstacles/>
+          <ClearCostmap/>
           <Fallback name="CriticalNavOrStop">
             <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
             <!-- Docking failed — stay stopped, battery is critical -->
@@ -330,6 +331,7 @@
                     <Inverter><IsRainModeAtLeast mode="2"/></Inverter>
                     <Sequence name="RainDockSequence">
                       <PublishHighLevelStatus state="2" state_name="RAIN_DETECTED_DOCKING"/>
+                      <ClearCostmap/>
                       <Fallback name="RainNavOrStay">
                         <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
                         <AlwaysSuccess/>
@@ -387,6 +389,7 @@
                   <SetMowerEnabled enabled="false"/>
                   <StopMoving/>
                   <PublishHighLevelStatus state="2" state_name="LOW_BATTERY_DOCKING"/>
+                  <ClearCostmap/>
                   <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
                   <PublishHighLevelStatus state="1" state_name="CHARGING"/>
                   <Fallback name="ChargeOrAbort">
@@ -460,10 +463,18 @@
                   <Fallback name="MowOrSkipArea">
                     <Sequence name="PlanThenFollow">
                       <PublishHighLevelStatus state="2" state_name="PLANNING"/>
+                      <!-- headland_width_m=0.30 (was 0.20) insets the
+                           F2C path 0.30 m from the operator polygon
+                           edge. With wheel-PI motor model + production
+                           IMU noise the post-pivot lateral drift can
+                           hit 0.20 m; planning at 0.20 m inset pushed
+                           the chassis center over the line on most
+                           swath-end pivots and triggered boundary
+                           recovery. 0.30 m gives a working margin. -->
                       <PlanCoverageArea
                           area_index="{current_area_index}"
                           operation_width_m="0.20"
-                          headland_width_m="0.20"/>
+                          headland_width_m="0.30"/>
                       <RetryUntilSuccessful num_attempts="5" name="FollowStripRetry">
                         <Fallback name="MowOrRecover">
                         <Sequence name="MowPath">
@@ -521,6 +532,7 @@
             <Sequence name="FailedCoverageDock">
               <SetMowerEnabled enabled="false"/>
               <PublishHighLevelStatus state="2" state_name="COVERAGE_FAILED_DOCKING"/>
+              <ClearCostmap/>
               <Fallback name="FailedCoverageNavOrStop">
                 <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
                 <Sequence>
@@ -535,14 +547,48 @@
           </Fallback>
           </ReactiveSequence>
 
-          <!-- Mowing complete — dock -->
-          <SetMowerEnabled enabled="false"/>
-          <PublishHighLevelStatus state="1" state_name="MOWING_COMPLETE"/>
-          <SaveObstacles/>
-          <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
-          <PublishHighLevelStatus state="1" state_name="IDLE_DOCKED"/>
-          <EndSession/>
-          <ClearCommand/>
+          <!-- Mowing complete — dock. Mirrors HomeSequence's robustness:
+               * ReactiveSequence re-checks IsCommand(1) every tick, so a
+                 new operator command (HOME, cancel, delete-maps, …) halts
+                 the in-flight DockRobot instead of holding the BT hostage
+                 for the full retry budget. The plain parent <Sequence>
+                 only evaluates IsCommand(1) on entry, so without this
+                 wrapper the terminal dock was un-interruptible — the
+                 "Mowing Complete, nothing responds" lockup.
+               * ReactiveFallback(IsCharging) short-circuits the moment the
+                 charging pins engage, even if opennav_docking hasn't
+                 concluded yet (GPS drift near the dock).
+               * Fallback(DockRobot / NAV_TO_DOCK_FAILED+AlwaysSuccess)
+                 guarantees we fall through to ClearCommand even when the
+                 dock action ultimately fails — otherwise current_command
+                 stayed latched at 1 and the BT re-entered the terminal
+                 dock forever.
+               ClearCostmap runs after SaveObstacles: persist what we
+               learned, then wipe stale marks so the nav-to-staging
+               approach isn't walled off by residual obstacle cells (fresh
+               scans re-populate real obstacles immediately). -->
+          <ReactiveSequence name="MowingCompleteSequence">
+            <IsCommand command="1"/>
+            <Sequence name="MowingCompleteAction">
+              <SetMowerEnabled enabled="false"/>
+              <PublishHighLevelStatus state="1" state_name="MOWING_COMPLETE"/>
+              <SaveObstacles/>
+              <ClearCostmap/>
+              <ReactiveFallback name="MowingCompleteOrDocked">
+                <IsCharging/>
+                <Fallback name="MowingCompleteDockOrStop">
+                  <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
+                  <Sequence>
+                    <PublishHighLevelStatus state="0" state_name="NAV_TO_DOCK_FAILED"/>
+                    <AlwaysSuccess/>
+                  </Sequence>
+                </Fallback>
+              </ReactiveFallback>
+              <PublishHighLevelStatus state="1" state_name="IDLE_DOCKED"/>
+              <EndSession/>
+              <ClearCommand/>
+            </Sequence>
+          </ReactiveSequence>
         </Sequence>
 
         <!-- ============================================================
@@ -574,6 +620,9 @@
               <Sequence name="NavigateHome">
                 <PublishHighLevelStatus state="2" state_name="RETURNING_HOME"/>
                 <SaveObstacles/>
+                <!-- Wipe stale obstacle cells so the nav-to-staging dock
+                     approach isn't walled off (see MowingCompleteSequence). -->
+                <ClearCostmap/>
                 <Fallback name="HomeNavOrStop">
                   <DockRobot dock_id="home_dock" dock_type="simple_charging_dock"/>
                   <Sequence>

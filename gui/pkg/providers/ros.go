@@ -29,6 +29,7 @@ var topicMap = map[string]topicDef{
 	"status":              {"/hardware_bridge/status", "mowgli_interfaces/msg/Status"},
 	"highLevelStatus":     {"/behavior_tree_node/high_level_status", "mowgli_interfaces/msg/HighLevelStatus"},
 	"gps":                 {"/gps/absolute_pose", "mowgli_interfaces/msg/AbsolutePose"},
+	"gnssStatus":          {"/gps/status", "mowgli_interfaces/msg/GnssStatus"},
 	// The robot's global pose comes from fusion_graph_node, the sole
 	// map-frame localizer. "pose" and "fusionRaw" both point at
 	// /odometry/filtered_map; the duplicate key is kept for backwards

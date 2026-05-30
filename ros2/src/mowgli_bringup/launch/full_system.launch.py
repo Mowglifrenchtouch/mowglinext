@@ -25,7 +25,7 @@ Brings up all subsystems:
   3. Behavior tree node       — mowgli_behavior
   4. Map server               — mowgli_map
   5. Wheel odometry            — mowgli_localization
-  6. NavSat converter          — mowgli_localization (GPS for GUI/BT)
+  6. NavSat converter          — mowgli_localization (/gps/absolute_pose, /gps/status, /gps/pose_cov)
   7. Localization monitor      — mowgli_localization
   8. Diagnostics               — mowgli_monitoring
   9. MQTT bridge (optional)   — mowgli_monitoring
@@ -255,20 +255,28 @@ def generate_launch_description() -> LaunchDescription:
     # publisher for /wheel_odom. Keep the source in the package for now
     # (disabled) and rely on hardware_bridge alone.
     # ------------------------------------------------------------------
-    # 7a. NavSat → AbsolutePose converter (for GUI + BT)
+    # 7a. NavSat adapter for legacy AbsolutePose + typed GNSS status
     # navsat_transform_node takes /gps/fix directly for the EKF pipeline;
-    # this node publishes a parallel /gps/absolute_pose (Mowgli-specific
-    # message) for the GUI/BT, and /gps/pose_cov which ekf_map_node fuses.
+    # this node publishes /gps/status through the shared GNSS adapter,
+    # keeps /gps/absolute_pose for legacy consumers, and emits /gps/pose_cov
+    # for ekf_map_node fusion.
     # ------------------------------------------------------------------
     datum_lat = float(robot_params.get("datum_lat", 0.0))
     datum_lon = float(robot_params.get("datum_lon", 0.0))
+    gnss_backend = os.environ.get("GNSS_BACKEND", "gps")
+    gps_protocol = os.environ.get("GPS_PROTOCOL", "UBX")
     navsat_converter_node = Node(
         package="mowgli_localization",
         executable="navsat_to_absolute_pose_node",
         name="navsat_to_absolute_pose",
         output="screen",
         parameters=[
-            {"datum_lat": datum_lat, "datum_lon": datum_lon},
+            {
+                "datum_lat": datum_lat,
+                "datum_lon": datum_lon,
+                "gnss_backend": gnss_backend,
+                "gps_protocol": gps_protocol,
+            },
             {"use_sim_time": use_sim_time},
         ],
     )

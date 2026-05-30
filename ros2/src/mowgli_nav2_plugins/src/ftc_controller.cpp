@@ -187,6 +187,7 @@ void FTCController::declareParameters(const rclcpp_lifecycle::LifecycleNode::Sha
   config_.max_lateral_deviation = declare_double("max_lateral_deviation", 1.5);
   config_.deviation_step = declare_double("deviation_step", 0.05);
   config_.deviation_blend_rate = declare_double("deviation_blend_rate", 0.5);
+  config_.min_lateral_deviation = declare_double("min_lateral_deviation", 0.30);
   config_.obstacle_wait_timeout_s = declare_double("obstacle_wait_timeout_s", 5.0);
 
   // Register parameter-change callback.
@@ -366,6 +367,10 @@ rcl_interfaces::msg::SetParametersResult FTCController::onParameterChange(
     else if (key == "deviation_blend_rate")
     {
       config_.deviation_blend_rate = p.as_double();
+    }
+    else if (key == "min_lateral_deviation")
+    {
+      config_.min_lateral_deviation = p.as_double();
     }
     else if (key == "obstacle_wait_timeout_s")
     {
@@ -1254,15 +1259,39 @@ void FTCController::updateLateralDeviation(double dt)
   const std::size_t start_idx = std::min(static_cast<std::size_t>(current_index_),
                                          global_plan_.size() - 1);
 
-  // Step 1: figure out whether the current applied deviation still keeps the
-  // path clear in the lookahead window.
-  const bool currently_clear = ObstacleDeviation::isPathClearWithDeviation(
-      *costmap_map_, global_plan_, start_idx, config_.obstacle_lookahead, lateral_deviation_);
+  // The decision to STOP avoiding must be gated on whether the NOMINAL path
+  // (zero deviation) is clear within the lookahead — i.e. has the robot
+  // advanced far enough that the obstacle has left the forward window? It
+  // must NOT be gated on whether the currently-applied offset is clear:
+  // that is trivially true the instant we pick a clearing offset, so the old
+  // code declared "AVOIDANCE complete" ~0.2 s after entering, blended the
+  // offset back to ~0, re-detected the same obstacle, and re-entered — an
+  // endless flap at a tiny ±deviation_step offset (logged as repeated
+  // "entering AVOIDANCE ... at idx=N" / "AVOIDANCE complete" pairs at the
+  // same idx). The robot never offset enough to skirt anything; the
+  // sub-deadband ±step carrot shift just dithered it left-right in place.
+  const bool clear_at_zero = ObstacleDeviation::isPathClearWithDeviation(
+      *costmap_map_, global_plan_, start_idx, config_.obstacle_lookahead, 0.0);
 
-  if (!currently_clear)
+  if (clear_at_zero)
   {
-    // Need to grow the deviation. If we weren't already avoiding, choose a
-    // side from the first obstacle pose; otherwise keep the current sign.
+    // No obstacle on the nominal path ahead — either we never needed to
+    // avoid, or the robot has physically driven past the obstacle. Blend
+    // the offset back to zero and exit AVOIDANCE once settled.
+    target_lateral_deviation_ = 0.0;
+    if (is_avoiding_ && std::abs(lateral_deviation_) < 0.01)
+    {
+      is_avoiding_ = false;
+      RCLCPP_INFO(logger_, "FTCController: AVOIDANCE complete, back on path.");
+    }
+  }
+  else
+  {
+    // Obstacle present on the nominal path within the lookahead. Commit to a
+    // deviation that keeps the OFFSET path clear and HOLD it until the robot
+    // has passed the obstacle (clear_at_zero becomes true). The deviation is
+    // monotonically non-decreasing while the obstacle remains — we never
+    // reduce it toward the path here, which is what stopped the flap.
     if (!is_avoiding_)
     {
       const int obs_idx = ObstacleDeviation::findFirstObstacleIndex(
@@ -1291,6 +1320,10 @@ void FTCController::updateLateralDeviation(double dt)
         }
       }
       is_avoiding_ = true;
+      // Latch the chosen side for the whole episode. target is guaranteed
+      // nonzero here (the both-sides-blocked path above either waits and
+      // returns or throws, so we never reach this with target == 0).
+      avoid_sign_ = (target_lateral_deviation_ >= 0.0) ? 1.0 : -1.0;
       obstacle_wait_start_.reset();
       obstacle_waiting_ = false;
       RCLCPP_INFO(logger_,
@@ -1299,15 +1332,38 @@ void FTCController::updateLateralDeviation(double dt)
                   obs_idx);
     }
 
-    // Grow the deviation until clear or past the cap.
-    target_lateral_deviation_ = ObstacleDeviation::growDeviationUntilClear(
-        *costmap_map_,
-        global_plan_,
-        start_idx,
-        config_.obstacle_lookahead,
-        target_lateral_deviation_,
-        config_.max_lateral_deviation,
-        config_.deviation_step);
+    // Floor the SEARCH START to min_lateral_deviation. growDeviationUntilClear
+    // only samples the single offset point per pose, so a one-step (0.05 m)
+    // offset can "clear" the path centerline while the 0.40 m chassis still
+    // overlaps the lethal cell (the costmap's inscribed-inflation radius here
+    // is only ~0.10 m — the footprint rear edge — far less than the 0.20 m
+    // half-width). Starting the search at min makes grow validate clearance
+    // from a body-width offset upward, and grow still increases past min (or
+    // reports > max) if min itself is blocked — so this never forces the
+    // carrot into an obstacle the way a blind post-grow floor would, since
+    // clearance is not monotonic in the offset.
+    double dev_init = target_lateral_deviation_;
+    if (config_.min_lateral_deviation > 0.0 && std::abs(dev_init) < config_.min_lateral_deviation)
+    {
+      // Use the LATCHED avoidance side, not the sign of dev_init: a transient
+      // clear_at_zero tick can leave dev_init == 0 mid-episode, and deriving
+      // the sign from it would flip the skirt onto the blocked side. Clamp
+      // the floor to max so a min > max misconfig can't make grow start past
+      // the cap (which would abort the strip on every obstacle).
+      const double floor_mag =
+          std::min(config_.min_lateral_deviation, config_.max_lateral_deviation);
+      dev_init = avoid_sign_ * floor_mag;
+    }
+
+    // Grow the deviation until the offset path is clear (keeps current side).
+    target_lateral_deviation_ =
+        ObstacleDeviation::growDeviationUntilClear(*costmap_map_,
+                                                   global_plan_,
+                                                   start_idx,
+                                                   config_.obstacle_lookahead,
+                                                   dev_init,
+                                                   config_.max_lateral_deviation,
+                                                   config_.deviation_step);
 
     if (std::abs(target_lateral_deviation_) > config_.max_lateral_deviation)
     {
@@ -1318,17 +1374,6 @@ void FTCController::updateLateralDeviation(double dt)
       {
         return;
       }
-    }
-  }
-  else if (is_avoiding_)
-  {
-    // Path is clear at the current deviation — start blending back toward
-    // the original path.
-    target_lateral_deviation_ = 0.0;
-    if (std::abs(lateral_deviation_) < 0.01)
-    {
-      is_avoiding_ = false;
-      RCLCPP_INFO(logger_, "FTCController: AVOIDANCE complete, back on path.");
     }
   }
 

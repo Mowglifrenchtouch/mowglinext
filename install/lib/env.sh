@@ -50,8 +50,9 @@ setup_env() {
   # udev rule. GPS_BY_ID, GPS_UART_DEVICE, and UNICORE_COM_PORT are installer
   # support variables kept for reruns and diagnostics.
   #
-  # UBLOX_DEVICE_SERIAL_STRING is retained only for compatibility with older
-  # docker/.env generations that predate the unified GPS_PORT contract.
+  # GNSS_BACKEND=ublox now reuses the shared sensors/gps container and selects
+  # the receiver via GPS_BY_ID / GPS_PORT. UBLOX_DEVICE_SERIAL_STRING remains
+  # as a compatibility key for older .env migrations only.
   : "${GNSS_BACKEND:=gps}"
   : "${GPS_CONNECTION:=uart}"
   : "${GPS_PROTOCOL:=UBX}"

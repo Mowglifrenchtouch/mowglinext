@@ -187,7 +187,7 @@ mowgli:
     # to bias more (hard fences) or less (open lawn).
     # chassis_safety_inset: 0.20
     path_spacing: 0.18             # = tool_width for full coverage
-    min_turning_radius: 0.30       # differential drive can turn tight
+    min_turning_radius: 0.05       # skid-steer pivots in place; large values force wide F2C U-turns
 
     # -----------------------------------------------------------------
     # Docking

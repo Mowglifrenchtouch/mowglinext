@@ -135,6 +135,24 @@ private:
   double dr_y_ = 0.0;
   double dr_yaw_ = 0.0;
   double wheel_vx_ = 0.0;  // latest forward velocity cached from /wheel_odom
+  double wheel_wz_ = 0.0;  // latest wheel-derived yaw rate (slip-veto cross-check)
+
+  // Dead-reckoning slip veto (mirrors the graph-side slip veto in
+  // graph_manager.cpp, but in rate form because OnImu integrates one
+  // gyro sample at a time). When the wheel encoders claim a yaw rate
+  // the chassis gyro doesn't corroborate — wheels skating on wet
+  // grass during a pivot — the wheel's forward velocity is a fiction
+  // and must NOT accumulate into dr_x_/dr_y_, otherwise the odom
+  // frame drifts metres from the real chassis path (observed
+  // 2026-05-27: odom→base reached 74 m while the robot sat on a ~10 m²
+  // lawn, and the resulting map→odom lever arm amplified graph-vs-DR
+  // yaw differences into 100 m map-pose jumps). Rate thresholds:
+  //   dr_slip_gyro_max_rad_per_s : gyro must read near-still
+  //   dr_slip_wheel_min_rad_per_s: wheel must claim a real yaw rate
+  // The disagreement itself is |wheel_wz_ - gz|, gated by the two
+  // above so a normal coordinated turn (both agree) is never vetoed.
+  double dr_slip_gyro_max_rad_per_s_ = 0.15;
+  double dr_slip_wheel_min_rad_per_s_ = 0.15;
 
   // GPS antenna radial offset from base_link, hypot(lever_arm_x,
   // lever_arm_y). Used by the RTK wrong-fix gate in OnGnss to
@@ -178,6 +196,34 @@ private:
   // Latched seeds for initialization.
   std::optional<gtsam::Vector2> seed_xy_;  // from latest GPS
   std::optional<double> seed_yaw_;  // from latest COG/mag
+
+  // --- 180° yaw-flip recovery -----------------------------------------------
+  // COG yaw is the PHYSICAL travel direction (wheels + GPS displacement) and
+  // is only emitted on a solid straight-line baseline — it cannot lie about
+  // which way the robot is facing. If the fused estimate disagrees with it by
+  // ~180° for several consecutive COG samples, the estimate is flipped (a seed
+  // that initialised backwards, or a gyro chain that jumped during a pivot
+  // where COG was gated off). The normal non-robust COG unary can fail to pull
+  // it back across the half-turn, so when this persistent disagreement is seen
+  // we force-re-anchor the yaw onto the COG (trusting the physics). Gated on a
+  // large threshold + N consecutive samples so it never fires in normal
+  // operation. Field 2026-05-29: "robot thinks it faces backwards, drives in
+  // reverse toward a goal that is in front."
+  bool cog_flip_recovery_enabled_ = true;
+  double cog_flip_threshold_rad_ = 2.618;  // ~150°
+  int cog_flip_consecutive_n_ = 3;
+  int cog_flip_count_ = 0;
+  uint64_t cog_flip_recoveries_ = 0;  // diagnostic counter
+  // Robustness gates so the recovery is a reliable safety net, not an
+  // amplifier (it fired repeatedly on garbage COG during an FTC oscillation,
+  // field 2026-05-29): require RTK-Fixed fresh (COG GPS-grounded), require the
+  // consecutive flipped COGs to agree WITH EACH OTHER (so a jittering COG
+  // can't drive it), and rate-limit re-fires.
+  bool cog_flip_require_rtk_ = true;
+  double cog_flip_min_interval_s_ = 10.0;
+  double cog_flip_consistency_rad_ = 0.52;  // ~30°
+  std::optional<double> cog_flip_prev_yaw_;
+  std::optional<rclcpp::Time> last_flip_recovery_stamp_;
   // True when seed_xy_ was set from an RTK-Fixed fix (carr_soln=2).
   // Drives the prior sigma at Initialize: tight (sub-cm) when set,
   // configured default (cm-decimetre) otherwise. Without this the
@@ -282,6 +328,12 @@ private:
   bool last_hl_state_valid_ = false;
   bool last_is_charging_ = false;
   bool last_is_charging_valid_ = false;
+  // One-shot per dock session: ensures SeedFromDockPose fires exactly
+  // once per docked interval, even when the boot-while-docked race
+  // means neither the rising_edge nor boot_while_docked branches can
+  // catch the moment gps_seen_once_ flips true. Reset on undock so
+  // the next dock arrival re-seeds.
+  bool dock_seeded_this_session_ = false;
 
   // Dock-arrival pose seed (formerly the dock_yaw_to_set_pose node).
   // On the rising edge of is_charging we anchor the graph at the
@@ -320,6 +372,14 @@ private:
   // (vx_max ≈ 0.30 m/s × 0.1 s = 30 mm). 50 mm leaves headroom for
   // 1-2σ outliers while still catching ≥0.5σ wrong-fix jumps.
   double rtk_wrongfix_max_jump_m_ = 0.05;
+  // σ (m) of the WEAK GPS factor kept while charging on the dock. Fully
+  // suppressing GPS on the dock left a stationary graph with only the single
+  // bootstrap prior as an absolute constraint → after ~60 nodes iSAM2 hit an
+  // indeterminate (underconstrained) linear system and the node ABORTED
+  // (field 2026-05-29, crash near x62). A deliberately loose GPS factor keeps
+  // the system well-posed without walking the trajectory off the (tighter)
+  // dock prior. Large enough that the dock prior still dominates xy.
+  double dock_gps_sigma_m_ = 0.50;
   // Wheel-derived distance (m) traveled since the last GPS sample,
   // below which a GPS jump > rtk_wrongfix_max_jump_m_ is judged
   // inconsistent. 20 mm sits just above the per-tick encoder noise
@@ -335,6 +395,25 @@ private:
   double icp_max_delta_theta_rad_ = 0.50;
   double icp_max_divergence_xy_m_ = 0.15;
   double icp_max_divergence_theta_rad_ = 0.35;
+
+  // --- Scan-match yield-to-RTK gating ---------------------------------------
+  // On a feature-poor open lawn, ICP scan-between factors (σ_xy ≈ 2 cm) are
+  // subtly biased and, chained across many nodes, pull map→odom by 15-60 cm
+  // even while RTK-Fixed GPS (σ ≈ 7 mm) is available — which jitters every
+  // map-frame consumer (dock target, coverage strips) and broke docking
+  // (field 2026-05-29: dock "drove to the side" as the target shifted under
+  // it). Fix: when RTK-Fixed has been seen within scan_yield_timeout_s,
+  // inflate the scan-between σ to scan_yield_sigma_* so GPS dominates and the
+  // map frame stays pinned; once the fix is lost for longer than the timeout,
+  // fall back to the tight ICP σ so scan-matching carries the estimate
+  // through the no-fix window (its whole reason for existing). Set
+  // scan_yield_to_rtk_=false to keep scan-matching always tight (feature-rich
+  // sites). This does NOT affect the use_scan_matching_=false baseline.
+  bool scan_yield_to_rtk_ = true;
+  double scan_yield_timeout_s_ = 2.0;
+  double scan_yield_sigma_xy_ = 0.5;
+  double scan_yield_sigma_theta_ = 0.3;
+  std::optional<rclcpp::Time> last_rtk_fixed_stamp_;
 
   // In-flight guards for the async maintenance jobs. Save and rebase
   // each run in a detached worker so the executor callback returns

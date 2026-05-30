@@ -63,6 +63,7 @@
 #include "mowgli_hardware/ll_datatypes.hpp"
 #include "mowgli_hardware/packet_handler.hpp"
 #include "mowgli_hardware/serial_port.hpp"
+#include "mowgli_hardware/angular_rate_controller.hpp"
 
 // High-level mode constants — must match HighLevelStatus.msg and the
 // HL_MODE_* defines in firmware/mowgli_protocol.h. Declared locally to
@@ -137,6 +138,18 @@ private:
     // ticks_per_meter matches the firmware-side scaling).
     wheel_track_ = declare_parameter<double>("wheel_track", 0.325);
     ticks_per_meter_ = declare_parameter<double>("ticks_per_meter", 300.0);
+    // Closed-loop angular-rate controller — see angular_rate_controller.hpp.
+    // Gains are gentle by default (USB latency caps them); tune live via
+    // ros2 param set. angular_rate_loop_enabled:=false → plain passthrough.
+    angular_rate_loop_enabled_ = declare_parameter<bool>("angular_rate_loop_enabled", true);
+    angular_rate_params_.kff = declare_parameter<double>("angular_rate_kff", 1.0);
+    angular_rate_params_.kp = declare_parameter<double>("angular_rate_kp", 0.4);
+    angular_rate_params_.ki = declare_parameter<double>("angular_rate_ki", 2.0);
+    angular_rate_params_.max_cmd = declare_parameter<double>("angular_rate_max_cmd", 1.5);
+    angular_rate_params_.integral_max =
+        declare_parameter<double>("angular_rate_integral_max", 1.5);
+    angular_rate_params_.target_lp_tau =
+        declare_parameter<double>("angular_rate_target_lp_tau", 0.2);
 
     // Dock pose comes solely from mowgli_robot.yaml (declared as ROS
     // parameters above). Calibration and manual GUI adjustments persist
@@ -260,6 +273,16 @@ private:
                std::shared_ptr<mowgli_interfaces::srv::EmergencyStop::Response> res)
         {
           on_emergency_stop(req, res);
+        });
+
+    // Reboot the STM32 board (NVIC_SystemReset). Recovers a wedged firmware
+    // state — e.g. the IMU emitting NaN — without a manual power-cycle.
+    srv_reboot_board_ = create_service<std_srvs::srv::Trigger>(
+        "~/reboot_board",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+        {
+          on_reboot_board(req, res);
         });
   }
 
@@ -933,6 +956,12 @@ private:
     msg.angular_velocity.y = gy;
     msg.angular_velocity.z = gz;
 
+    // Latest bias-corrected yaw rate, snapshotted for the closed-loop
+    // angular-rate controller in on_cmd_vel. Single-writer (this IMU path) /
+    // single-reader (cmd_vel callback), both on the one rclcpp executor —
+    // no lock needed. ~90 Hz, well above cmd_vel cadence.
+    latest_gyro_z_ = gz;
+
     // Magnetometer data is ignored — uncalibrated on metal robot chassis,
     // gives ~229° error vs real heading. dock_pose_yaw is set from config
     // (user measures with phone compass).
@@ -1290,6 +1319,32 @@ private:
     send_raw_packet(reinterpret_cast<const uint8_t*>(&pkt), sizeof(LlCmdBlade) - sizeof(uint16_t));
   }
 
+  void send_reboot_command()
+  {
+    LlReboot pkt{};
+    pkt.type = PACKET_ID_LL_REBOOT;
+    pkt.magic = kLlRebootMagic;
+    send_raw_packet(reinterpret_cast<const uint8_t*>(&pkt), sizeof(LlReboot) - sizeof(uint16_t));
+  }
+
+  void on_reboot_board(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                       std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+  {
+    if (!serial_ || !serial_->is_open())
+    {
+      res->success = false;
+      res->message = "serial port not open";
+      return;
+    }
+    RCLCPP_WARN(get_logger(), "reboot_board: sending NVIC_SystemReset request to STM32.");
+    // Fire twice — a single packet lost to USB jitter shouldn't silently
+    // no-op a deliberate recovery action.
+    send_reboot_command();
+    send_reboot_command();
+    res->success = true;
+    res->message = "reboot request sent; board will reset within ~1 s";
+  }
+
   void handle_blade_status(const uint8_t* data, std::size_t len)
   {
     if (len < sizeof(LlBladeStatus))
@@ -1314,7 +1369,7 @@ private:
   void on_cmd_vel(geometry_msgs::msg::TwistStamped::ConstSharedPtr msg)
   {
     double vx = msg->twist.linear.x;
-    const double wz = msg->twist.angular.z;
+    double wz = msg->twist.angular.z;
 
     // The firmware ignores cmd_vel when mode is IDLE.  When velocity commands
     // arrive (from Nav2 or teleop), ensure the firmware is in AUTONOMOUS mode.
@@ -1348,21 +1403,40 @@ private:
     // 0.16` and RPP's `min_approach_linear_velocity: 0.16` for the
     // canonical examples).
     //
-    // wz is intentionally left passthrough: FTC's fine-heading
-    // corrections during PRE_ROTATE and headland turns command
-    // sub-deadband angular velocities to close small (~0.1 rad)
-    // yaw_goal_tolerance errors. Zeroing them would prevent goal
-    // convergence. The motor PWM 40 pivot deadband is closer to 0.6
-    // rad/s on this chassis and the resulting wheel/IMU mismatch in
-    // pure-rotation mode is small enough to be absorbed by the graph's
-    // gyro between-factor (since both legs of a pivot integrate the
-    // same gyro_z and only the wheel-derived ω is silenced, which the
-    // non-holo factor already handles).
-    constexpr double kMinLinVel = 0.15;          // m/s — PWM 40 forward deadband + margin
+    // wz handling — closed-loop angular-rate controller.
+    //
+    // WHY: the firmware PWM→rotation response is nonlinear and load-
+    // dependent (measured 2026-05-27: commanded 0.2/0.3/0.4 rad/s → actual
+    // 0.07/0.22/0.30, i.e. a soft deadband plus a ~0.7-0.75 drifting gain).
+    // Every Nav2 controller assumes commanded ω == actual ω, so the mismatch
+    // surfaced as under-rotation, dock-approach stalls and (when an earlier
+    // fix over-corrected) left/right oscillation. Four open-loop amplitude
+    // hacks (floor 0.85 / pulse / floor 0.5 / pulse+burst) all failed because
+    // none measured the result. compute_angular_rate_cmd() closes the loop on
+    // the gyro so the firmware command is driven until measured == target,
+    // absorbing the deadband + nonlinear gain at every operating point. See
+    // angular_rate_controller.hpp for the full rationale and the history.
+    // Safe now (the closed-loop boost 2a371798 was dropped pre-slip-veto)
+    // because fusion_graph slip-vetoes the transient wheel/IMU mismatch.
+    // Set angular_rate_loop_enabled:=false to fall back to passthrough.
+    //
+    // The sub-deadband |vx| → 0 guard is unchanged (linear has no clean
+    // host-side rate feedback — encoders slip; leave it to Nav2's loops).
+    constexpr double kMinLinVel = 0.15;  // m/s — PWM 40 forward deadband + margin
     constexpr double kMinCmdToConsider = 1.0e-3;  // ignore floating-point dust
     if (std::abs(vx) > kMinCmdToConsider && std::abs(vx) < kMinLinVel)
     {
       vx = 0.0;
+    }
+    if (angular_rate_loop_enabled_)
+    {
+      const rclcpp::Time now = this->now();
+      const double dt = last_cmd_vel_time_.nanoseconds() > 0
+                            ? (now - last_cmd_vel_time_).seconds()
+                            : 0.0;
+      last_cmd_vel_time_ = now;
+      wz = mowgli_hardware::compute_angular_rate_cmd(
+          wz, latest_gyro_z_, dt, angular_rate_params_, angular_rate_state_);
     }
 
     LlCmdVel pkt{};
@@ -1431,6 +1505,7 @@ private:
 
   rclcpp::Service<mowgli_interfaces::srv::MowerControl>::SharedPtr srv_mower_control_;
   rclcpp::Service<mowgli_interfaces::srv::EmergencyStop>::SharedPtr srv_emergency_stop_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reboot_board_;
 
   rclcpp::TimerBase::SharedPtr timer_read_;
   rclcpp::TimerBase::SharedPtr timer_heartbeat_;
@@ -1471,6 +1546,14 @@ private:
   double dock_yaw_{0.0};
   double wheel_track_{0.325};
   double ticks_per_meter_{300.0};
+  // Closed-loop angular-rate controller (on_cmd_vel). Drives the firmware yaw
+  // command from gyro feedback so measured ω tracks the commanded ω across
+  // the firmware's nonlinear PWM curve. See angular_rate_controller.hpp.
+  bool angular_rate_loop_enabled_{true};
+  mowgli_hardware::AngularRateParams angular_rate_params_{};
+  mowgli_hardware::AngularRateState angular_rate_state_{};
+  double latest_gyro_z_{0.0};  ///< bias-corrected gyro_z, from the IMU path.
+  rclcpp::Time last_cmd_vel_time_{0, 0, RCL_ROS_TIME};
   bool mow_enabled_{false};
   bool is_charging_{false};
   uint8_t current_mode_{0};

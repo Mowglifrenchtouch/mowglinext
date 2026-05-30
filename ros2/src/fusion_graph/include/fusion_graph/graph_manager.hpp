@@ -89,6 +89,22 @@ struct GraphParams
   // loss for our well-constrained Pose2 graph.
   int isam2_relinearize_skip = 5;
 
+  // Sliding-window cap. RebaseISAM2 keeps only the most recent
+  // `max_graph_nodes` pose nodes; everything older is dropped (its
+  // accumulated constraints were already collapsed into the kept
+  // nodes' priors during the rebase, so dropping them is loss-free
+  // for the current estimate). Without this the graph grew unbounded
+  // — observed 48,000+ nodes after a few sessions, which (a) blew up
+  // iSAM2 marginal-covariance cost and pushed cov_xx to ~1 m, and (b)
+  // kept stale far-away nodes anchoring the trajectory shape. 0 means
+  // "no cap" (legacy behaviour: rebase keeps everything). At the 25 Hz
+  // node rate, 3000 nodes ≈ 2 min of trajectory, which comfortably
+  // covers a single mowing pass; LiDAR loop closures within that
+  // window still function. Combined with isam2_rebase_every_nodes the
+  // live graph oscillates in [max_graph_nodes, max_graph_nodes +
+  // rebase_interval].
+  uint64_t max_graph_nodes = 3000;
+
   // Stationary node-creation throttle. If the per-tick accumulator
   // shows ~zero motion (|dxy| < thresh AND |dtheta| < thresh), skip
   // node creation unless at least `stationary_node_period_s` has
@@ -131,6 +147,24 @@ struct GraphParams
   // 10 Hz (gate fires above ~0.12 rad/s).
   double pivot_gate_dtheta_rad = 0.012;  // rad per tick
   double pivot_wheel_sigma_x = 0.5;  // m — inflated sigma during pivot
+
+  // Slip-veto thresholds (see Tick() implementation for rationale).
+  // When the wheel-vs-gyro yaw delta disagreement exceeds
+  // slip_residual_thresh_rad AND the gyro itself is below
+  // slip_gyro_max_rad (i.e. the chassis isn't actually rotating much)
+  // AND the wheel claims a non-trivial rotation, the BetweenFactor's
+  // (dx, dy) is zeroed — wheels are skating and their translation is
+  // a fiction. Defaults are tuned for 25 Hz nodes; thresholds are
+  // in *per-tick* radians so the gate scales with node_period_s.
+  //   slip_residual_thresh_rad = 0.01 (≈ 0.57° / tick = 14°/s @ 25 Hz)
+  //   slip_gyro_max_rad        = 0.005 rad / tick (≈ 7°/s) — well
+  //                              under any meaningful in-place pivot.
+  //   slip_wheel_min_rad       = 0.005 rad / tick — wheel must be
+  //                              claiming a non-trivial rotation for
+  //                              the gate to apply.
+  double slip_residual_thresh_rad = 0.01;
+  double slip_gyro_max_rad = 0.005;
+  double slip_wheel_min_rad = 0.005;
 
   // Stationary multi-source gate. The wheel-only gate (above) can be
   // tricked by encoders that report no motion while the robot is
@@ -297,6 +331,7 @@ struct GraphStats
   uint64_t icp_rejects_sanity = 0;   // unphysical delta magnitude
   uint64_t icp_rejects_divergence = 0;  // result far from initial guess
   uint64_t stationary_hand_push = 0;  // wheel stationary but gyro disagrees
+  uint64_t slip_veto = 0;  // ticks where wheel translation was vetoed by gyro
   // Adaptive process-noise telemetry. residual_ema_rad is the
   // current EMA-smoothed |dtheta_wheel - dtheta_gyro| (rad);
   // wheel_sigma_x_eff is the inflated σ_x actually used for the most
@@ -368,6 +403,13 @@ public:
   // Read-only accessors (snapshot of current state).
   std::optional<TickOutput> LatestSnapshot() const;
   GraphStats Stats() const;
+
+  // Count of pose ('x') variables currently live in the iSAM2 graph.
+  // Distinct from GraphStats::total_nodes, which is the monotonic
+  // next-index (never decreases). After a windowed RebaseISAM2 the
+  // live count is capped at max_graph_nodes while total_nodes keeps
+  // climbing. Exposed primarily for the sliding-window unit test.
+  uint64_t LiveNodeCount() const;
 
   // Peek at the current per-tick wheel+gyro accumulator without
   // consuming it (Tick() resets the accumulator atomically). Used by
@@ -456,6 +498,24 @@ public:
   // estimates and the variable set are preserved.
   void RebaseISAM2();
 
+  // Rigid-transform the entire trajectory by `correction` (applied as
+  // X_k_new = correction * X_k for every Pose2 node). Relative
+  // constraints between nodes (wheel between-factors, gyro between-
+  // factors, scan_between, loop closures) are gauge-invariant under
+  // this transform, so the graph topology and all LiDAR-derived
+  // structure is preserved. The optimized solution is rebuilt with
+  // priors at the shifted poses.
+  //
+  // Used at dock arrival when the latest node has accumulated drift
+  // vs the operator-calibrated dock_pose: a "gauge reset" that snaps
+  // the absolute frame so X_latest lands exactly on dock_pose,
+  // without losing the persisted LiDAR scans / loop-closure structure
+  // (which is what a Reset() would throw away). The latest node also
+  // receives a tighter prior (5 mm / 0.3°) so future GPS factors take
+  // longer to drift it back off the dock anchor.
+  void RigidTransformAll(const gtsam::Pose2& correction, double latest_node_sigma_xy = 0.005,
+                         double latest_node_sigma_theta = 0.005);
+
   // Add a loop-closure between-factor between two existing nodes.
   // delta is the relative Pose2 such that X_curr = X_prev * delta.
   // Triggers an iSAM2 update + returns the refreshed marginal pose
@@ -493,6 +553,10 @@ public:
   void Reset();
 
 private:
+  // Reset() body without taking mu_ — for callers that already hold the lock
+  // (e.g. the iSAM2 indeterminate-system catch inside ApplyIsamUpdateLocked).
+  void ResetLocked();
+
   // Per-node accumulator for between-factors.
   struct Accumulator
   {
@@ -593,6 +657,11 @@ private:
   uint64_t stats_icp_rejects_sanity_ = 0;
   uint64_t stats_icp_rejects_divergence_ = 0;
   uint64_t stats_hand_push_ = 0;
+  uint64_t stats_slip_veto_ = 0;
+  // Count of iSAM2 indeterminate-system catches that triggered a graph
+  // reset (instead of aborting the node). Nonzero = the graph hit an
+  // ill-posed state and self-healed; investigate if it climbs.
+  uint64_t stats_isam_resets_ = 0;
 
   // Adaptive process-noise state.
   // residual_ema_ tracks the EMA-smoothed |dtheta_wheel - dtheta_gyro|
@@ -648,13 +717,19 @@ private:
 
   // Internal — actually creates the node and runs iSAM2. Caller must
   // hold mu_.
-  TickOutput CreateNodeLocked(double now_s);
+  // Returns std::nullopt when an ill-posed iSAM2 update forced a graph
+  // ResetLocked() mid-node — the caller (Tick) must NOT publish a node
+  // (the graph is empty; a node would carry the datum-origin pose).
+  std::optional<TickOutput> CreateNodeLocked(double now_s);
 
   // Internal — wrap isam_.update so any factors/values added while an
   // async rebase is in progress are also captured in the pending
   // buffer (replayed onto the fresh iSAM2 before the swap). Caller
   // must hold mu_.
-  void ApplyIsamUpdateLocked(const gtsam::NonlinearFactorGraph& fg, const gtsam::Values& values);
+  // Returns false if the update hit an ill-posed system and triggered a
+  // ResetLocked() — callers MUST bail (the graph is now empty/uninitialised;
+  // continuing would publish a garbage origin pose).
+  bool ApplyIsamUpdateLocked(const gtsam::NonlinearFactorGraph& fg, const gtsam::Values& values);
 };
 
 }  // namespace fusion_graph

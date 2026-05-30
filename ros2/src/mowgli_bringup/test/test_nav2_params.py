@@ -27,39 +27,52 @@ def _controller_section(params: dict) -> dict:
     return params["controller_server"]["ros__parameters"]
 
 
-def test_coverage_goal_checker_xy_tolerance_is_tight() -> None:
-    """coverage_goal_checker.xy_goal_tolerance must be <= mower_width.
+# The coverage goal-checker was migrated off SimpleGoalChecker/StoppedGoalChecker
+# (commit 4bae0567) to PathProgressGoalChecker. The old "xy_goal_tolerance must
+# be <= mower_width" and "stateful must be true" guards belonged to the
+# SimpleGoalChecker era and no longer apply: PathProgressGoalChecker gates
+# completion on monotonic path progress (it cannot fire on the first tick before
+# the robot moves), and it has no `stateful` field. CLAUDE.md invariant: do NOT
+# use Simple/Stopped here.
+COVERAGE_GOAL_CHECKER_PLUGIN = "mowgli_nav2_plugins/PathProgressGoalChecker"
 
-    SimpleGoalChecker with stateful=true returns SUCCEEDED on the first
-    tick where the robot is within xy_goal_tolerance of the goal pose.
-    For cell-based mowing the strips are short (<3 m, often <0.5 m near
-    the robot's current pose). If the tolerance is 0.5 m, every strip is
-    "already done" before FTC publishes any cmd_vel, the controller
-    returns SUCCEEDED instantly, and the BT loops forever without
-    moving the robot.
 
-    Anything above mower_width (0.18 m) means the controller can decide
-    a strip is finished before driving even one full cell — regressions
-    bumping this back fail the build.
+def _coverage_goal_checker(cfg: dict) -> dict:
+    return cfg["coverage_goal_checker"]
+
+
+def test_coverage_goal_checker_is_path_progress() -> None:
+    """The coverage goal-checker MUST be PathProgressGoalChecker.
+
+    SimpleGoalChecker/StoppedGoalChecker fire on the final pose (or on
+    velocity stoppage) without requiring the robot to actually traverse
+    the path: the F2C path's last pose can sit 25-50 cm from where FTC's
+    PID converges (Dubins connector geometry), and StoppedGoalChecker
+    matches FTC's mid-traversal PRE_ROTATE pivots — both complete the
+    coverage action at near-zero coverage. PathProgressGoalChecker only
+    fires after monotonic progress >= progress_threshold of the path
+    poses (CLAUDE.md invariant).
     """
     cfg = _controller_section(_load_params())
-    tol = cfg["coverage_goal_checker"]["xy_goal_tolerance"]
-    # Use 0.20 m as the upper bound: 0.18 m mower_width + a bit of slack.
-    assert tol <= 0.20, (
-        f"coverage_goal_checker.xy_goal_tolerance={tol} m is too loose. "
-        "FTC will report SUCCEEDED on the first tick before the robot moves; "
-        "the BT will loop GetNextSegment forever. Tighten to <= mower_width."
+    assert _coverage_goal_checker(cfg)["plugin"] == COVERAGE_GOAL_CHECKER_PLUGIN
+
+
+def test_coverage_goal_checker_progress_threshold_is_high() -> None:
+    """progress_threshold gates completion on monotonic path traversal.
+    A low value would let the action succeed before the strip is mowed —
+    pin it high so the robot has to actually cover the swath.
+    """
+    cfg = _controller_section(_load_params())
+    gc = _coverage_goal_checker(cfg)
+    assert "progress_threshold" in gc, (
+        "PathProgressGoalChecker should pin progress_threshold explicitly "
+        "rather than relying on the plugin default."
     )
-
-
-def test_coverage_goal_checker_is_stateful() -> None:
-    """stateful=false would re-check tolerance every tick, defeating
-    the 'commit to the goal once reached' semantic FTC needs. If the
-    robot drifts during the post-success blade engagement, a non-stateful
-    checker would re-fire failure. Pin it true.
-    """
-    cfg = _controller_section(_load_params())
-    assert cfg["coverage_goal_checker"]["stateful"] is True
+    assert 0.90 <= gc["progress_threshold"] <= 1.0, (
+        f"coverage_goal_checker.progress_threshold={gc['progress_threshold']} "
+        "is out of the sane [0.90, 1.0] range; coverage would complete before "
+        "the swath is mowed."
+    )
 
 
 def test_stopped_goal_checker_velocity_threshold_is_set() -> None:
@@ -152,21 +165,21 @@ def test_mowgli_robot_yaml_default_coverage_tolerance_is_tight() -> None:
     )
 
 
-def test_no_lidar_variant_coverage_tolerance_is_tight() -> None:
-    """nav2_params_no_lidar.yaml is the GPS-only variant — same loose
-    tolerance regression risk as the main one.
+def test_no_lidar_variant_uses_path_progress_goal_checker() -> None:
+    """nav2_params_no_lidar.yaml is the GPS-only variant — it must use the
+    same PathProgressGoalChecker plugin with a high progress threshold and
+    sane finite tolerances as the LiDAR variant. (The old '<= mower_width
+    xy tolerance' guard was for SimpleGoalChecker, which is gone.)
     """
     here = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(here, "..", "config", "nav2_params_no_lidar.yaml")
     with open(path, "r", encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh)
-    tol = cfg["controller_server"]["ros__parameters"]["coverage_goal_checker"][
-        "xy_goal_tolerance"
-    ]
-    assert tol <= 0.20, (
-        f"nav2_params_no_lidar.yaml has coverage_goal_checker.xy_goal_tolerance={tol} m. "
-        "Same field bug as the LiDAR variant — tighten to <= mower_width."
-    )
+    gc = cfg["controller_server"]["ros__parameters"]["coverage_goal_checker"]
+    assert gc["plugin"] == COVERAGE_GOAL_CHECKER_PLUGIN
+    assert 0.90 <= gc["progress_threshold"] <= 1.0
+    assert 0.0 < gc["xy_goal_tolerance"] <= 1.0
+    assert 0.0 < gc["yaw_goal_tolerance"] <= 3.1416
 
 
 if __name__ == "__main__":

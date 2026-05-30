@@ -685,7 +685,20 @@ def generate_launch_description() -> LaunchDescription:
              "datum_lon": datum_lon,
              "enable_mag_cal": enable_mag_cal,
              "mag_calibration_path": mag_cal_path,
-             "stationary_seed_rate_hz": cog_stationary_rate},
+             "stationary_seed_rate_hz": cog_stationary_rate,
+             # Stationary-yaw aging penalty. The republish_latched path
+             # adds (rate · age)² to the variance to model the chance
+             # that the latched yaw has gone stale (manual rotation,
+             # gyro bias accumulation) since the last forward-motion
+             # measurement. Upstream default is 0.005 rad/s ≈ 0.29 °/s,
+             # which inflates σ to ~45° after 2-3 min stationary —
+             # aggressive enough that fusion_graph effectively ignores
+             # the seed during normal idle windows. On this chassis the
+             # post-calibration gyro bias drift is closer to 0.01-0.03 °/s,
+             # so 0.001 rad/s (= 0.057 °/s, ~3.4 °/min) is a much closer
+             # match and keeps σ ≈ 9° after 2-3 min — still penalises
+             # manual pushes but lets the EKF actually use the seed.
+             "stationary_yaw_drift_rate": 0.001},
         ],
     )
 

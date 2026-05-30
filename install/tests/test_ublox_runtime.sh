@@ -17,9 +17,10 @@ config_file="$REPO_ROOT/ros2/src/mowgli_bringup/config/ublox_gnss.yaml"
 section "Compose wiring"
 
 compose_content="$(cat "$compose_file")"
+assert_not_contains "compose does not pass legacy ublox_baud_rate override" 'ublox_baud_rate:=' "$compose_content"
 assert_contains "compose passes canonical GPS device path" 'GPS_DEVICE_PATH: ${GPS_PORT:-${UBLOX_DEVICE_SERIAL_STRING:-/dev/gps}}' "$compose_content"
 assert_contains "compose passes GPS_BAUD through shared gps fragment" 'GPS_BAUD: ${GPS_BAUD:-921600}' "$compose_content"
-assert_contains "compose documents legacy ublox fallback path" 'fall back to UBLOX_DEVICE_SERIAL_STRING for compose' "$compose_content"
+assert_contains "compose documents legacy ublox fallback path" 'fall back to UBLOX_DEVICE_SERIAL_STRING' "$compose_content"
 
 section "Launch wiring"
 
@@ -27,6 +28,8 @@ launch_content="$(cat "$launch_file")"
 assert_contains "launch still injects device serial string" '"DEVICE_SERIAL_STRING": device_serial_string' "$launch_content"
 assert_not_contains "launch no longer declares ublox_baud_rate" '"ublox_baud_rate"' "$launch_content"
 assert_not_contains "launch no longer injects BAUD_RATE" '"BAUD_RATE":' "$launch_content"
+assert_contains "launch remaps hp fix output into /gps/fix" 'remappings=[("/fix", "/gps/fix")]' "$launch_content"
+assert_contains "launch uses shared navsat adapter executable" 'executable="navsat_to_absolute_pose_node"' "$launch_content"
 
 section "Config presence"
 

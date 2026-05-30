@@ -109,7 +109,10 @@ TEST(Persistence, NonEmptyRoundTrip)
   {
     fg::GraphManager gm(fg::GraphParams{});
     gm.Initialize(gtsam::Pose2(1.0, 2.0, 0.5), 0.0);
-    gm.AddWheelTwist(0.1, 0.0, 0.0, 0.1);
+    // dx = vx*dt = 0.05 m must exceed the default stationary_motion_thresh_m
+    // (0.02 m); otherwise Tick() is throttled and returns nullopt with the
+    // out-of-the-box GraphParams{} this test uses.
+    gm.AddWheelTwist(0.5, 0.0, 0.0, 0.1);
     auto out = gm.Tick(0.2);
     ASSERT_TRUE(out.has_value());
     EXPECT_TRUE(gm.Save(prefix));

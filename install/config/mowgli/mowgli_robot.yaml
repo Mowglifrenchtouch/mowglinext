@@ -56,12 +56,12 @@ mowgli:
         # Defaults are physically measured on a YardForce500 with the
         # standard mowgli antenna/IMU/LiDAR mount. Override on the
         # Settings page if your robot differs.
-        gps_x: 0.173
-        gps_y: -0.004
+        gps_x: 0.3
+        gps_y: 0
         gps_z: 0.2
-        imu_x: 0.187
-        imu_y: -0.195
-        imu_z: 0
+        imu_x: 0.191
+        imu_y: -0.186
+        imu_z: 0.095
         # imu_pitch / imu_roll / imu_yaw are calibrated per robot —
         # use the GUI's Auto-calibrate button (Diagnostics → IMU yaw
         # calibration). Default 0 means uncalibrated.
@@ -70,7 +70,7 @@ mowgli:
         imu_yaw: 0
         lidar_x: 0
         lidar_y: 0.025
-        lidar_z: 0.1
+        lidar_z: 0.22
         lidar_yaw: -3.1416
 
         # ── GPS / RTK ───────────────────────────────────────────────
@@ -107,9 +107,16 @@ mowgli:
         undock_speed: 0.15
 
         # ── Mowing pattern ──────────────────────────────────────────
-        coverage_xy_tolerance: 0.5
+        # coverage_xy_tolerance: FTC coverage goal xy tolerance (m). Hard
+        #   ceiling 0.15 m in navigation.launch.py (clamped + warned above
+        #   that). 0.10 is the safe default.
+        coverage_xy_tolerance: 0.10
         headland_width: 0.18
-        min_turning_radius: 0.3
+        # min_turning_radius: F2C swath-connection turn radius (m). The
+        #   YardForce500 is a skid-steer that pivots in place, so keep this
+        #   small — a large value forces wide Dubins U-turns between swaths
+        #   and degrades coverage. 0.05 ≈ pivot-in-place.
+        min_turning_radius: 0.05
         mow_angle_increment_deg: 0
         mow_angle_offset_deg: -1
         mower_model: YardForce500
@@ -120,8 +127,12 @@ mowgli:
         path_spacing: 0.13
         progress_timeout_sec: 60
         transit_speed: 0.25
-        xy_goal_tolerance: 0.75
-        yaw_goal_tolerance: 1
+        # xy/yaw_goal_tolerance: Nav2 transit + dock-staging goal tolerance.
+        #   Keep tight — loose values let the robot "arrive" far from the
+        #   staging pose and miss the dock. 0.30 m / 0.20 rad are the sane
+        #   defaults; tighten per-site via the GUI if needed.
+        xy_goal_tolerance: 0.30
+        yaw_goal_tolerance: 0.20
 
         # ── Persistence ─────────────────────────────────────────────
         map_save_on_dock: true

@@ -188,6 +188,14 @@ private:
   bool is_avoiding_{false};
   double target_lateral_deviation_{0.0};
   double lateral_deviation_{0.0};
+  /// Sign (+1 = left, -1 = right) of the side chosen when AVOIDANCE was
+  /// entered. Held for the whole avoidance episode so the min-deviation
+  /// floor can restore the correct side even on a tick where a transient
+  /// clear_at_zero zeroed target_lateral_deviation_ while is_avoiding_ is
+  /// still true — without it, the floor's `(dev_init >= 0) ? +1 : -1` rule
+  /// would flip a right-side skirt to the left (toward the blocked side)
+  /// and could steer the chassis into the obstacle it was skirting.
+  double avoid_sign_{1.0};
 
   // Wait-before-abort window for the two "no path" cases inside
   // updateLateralDeviation: (a) both sides blocked at the obstacle pose,
@@ -303,6 +311,14 @@ private:
     double max_lateral_deviation{1.5};   // m, abort if needed offset exceeds this
     double deviation_step{0.05};         // m, search increment
     double deviation_blend_rate{0.5};    // m/s, slew rate for lateral_deviation_
+    /// Minimum committed offset magnitude (m) once AVOIDANCE is entered.
+    /// growDeviationUntilClear() only checks the path CENTERLINE sample
+    /// per pose, so a tiny offset (e.g. one deviation_step) can clear the
+    /// centerline while the robot's body — half_width ≈ chassis_width/2 —
+    /// still overlaps the lethal obstacle cell. Flooring the committed
+    /// deviation to ~half_width + margin guarantees the chassis skirts
+    /// the obstacle, not just the path point. 0 disables the floor.
+    double min_lateral_deviation{0.30};
     /// Wait-before-abort timeout when the AVOIDANCE search can't fit
     /// inside max_lateral_deviation (both sides blocked or the needed
     /// offset exceeds the cap). During the wait the robot stops; if the
